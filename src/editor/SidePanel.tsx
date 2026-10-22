@@ -22,6 +22,9 @@ interface Props {
   setMode: (m: EditorMode) => void
   draft: CommentDraft | null
   clearDraft: () => void
+  /** Cambia cuando otro cliente toca los comentarios; recarga la lista. */
+  commentsRev: number
+  onCommentsChanged: () => void
   versionsKey: number
   onSaveVersion: () => void
   onPreviewVersion: (v: Version) => void
@@ -41,7 +44,7 @@ export default function SidePanel(p: Props) {
 
   useEffect(() => {
     store.listComments(p.docId).then(setComments).catch(() => toast('No se pudieron cargar los comentarios', { error: true }))
-  }, [p.docId, toast])
+  }, [p.docId, p.commentsRev, toast])
   useEffect(() => {
     store.listVersions(p.docId).then(setVersions).catch(() => {})
   }, [p.docId, p.versionsKey])
@@ -69,6 +72,7 @@ export default function SidePanel(p: Props) {
       p.editor.chain().setTextSelection({ from: p.draft.from, to: p.draft.to }).setMark('comment', { commentId: c.id }).run()
       setBody('')
       p.clearDraft()
+      p.onCommentsChanged()
       toast('Comentario guardado', {
         action: {
           label: 'Deshacer',
@@ -91,6 +95,7 @@ export default function SidePanel(p: Props) {
       setComments((all) => [...all, c])
       setReply('')
       setReplyTo(null)
+      p.onCommentsChanged()
     } catch (e) {
       toast(`No se pudo responder: ${(e as Error).message}`, { error: true })
     }
@@ -100,6 +105,7 @@ export default function SidePanel(p: Props) {
     setComments((all) => all.map((x) => (x.id === c.id ? { ...x, resolved } : x)))
     try {
       await store.updateComment(c.id, { resolved })
+      p.onCommentsChanged()
     } catch {
       setComments((all) => all.map((x) => (x.id === c.id ? { ...x, resolved: !resolved } : x)))
       toast('No se pudo actualizar el comentario', { error: true })
@@ -112,6 +118,7 @@ export default function SidePanel(p: Props) {
     unmark(c.id)
     try {
       await store.deleteComment(c.id)
+      p.onCommentsChanged()
     } catch {
       setComments(before)
       toast('No se pudo borrar el comentario', { error: true })
@@ -204,7 +211,7 @@ export default function SidePanel(p: Props) {
         <Section title="Sugerencias" open={open.suggestions} toggle={() => setOpen((o) => ({ ...o, suggestions: !o.suggestions }))}>
           <div className="soon">
             <MessageSquare size={16} strokeWidth={1.5} />
-            <p>El modo sugerencia (cambios propuestos con aceptar y rechazar) llega con la colaboración en tiempo real.</p>
+            <p>El modo sugerencia (cambios propuestos con aceptar y rechazar) llegará en la próxima fase.</p>
           </div>
         </Section>
 
@@ -231,7 +238,7 @@ export default function SidePanel(p: Props) {
           <button role="radio" aria-checked={p.mode === 'edit'} className={p.mode === 'edit' ? 'is-on' : ''} onClick={() => p.setMode('edit')}>
             Editar
           </button>
-          <button role="radio" aria-checked={false} disabled title="Llega con la colaboración en tiempo real">
+          <button role="radio" aria-checked={false} disabled title="Próximamente: cambios propuestos con aceptar y rechazar">
             Sugerir
           </button>
           <button role="radio" aria-checked={p.mode === 'view'} className={p.mode === 'view' ? 'is-on' : ''} onClick={() => p.setMode('view')}>

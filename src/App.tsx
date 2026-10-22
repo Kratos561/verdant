@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useState } from 'react'
-import { currentUser } from './lib/auth'
+import { currentUser, isMember } from './lib/auth'
 import type { User } from './lib/auth'
 import { ToastProvider, useHashRoute } from './components/ui'
 import Library from './pages/Library'
-import Login from './pages/Login'
+import Login, { AccessDenied } from './pages/Login'
 import Editor from './pages/Editor'
+
+type Session = { user: User; member: boolean } | null
 
 export default function App() {
   const route = useHashRoute()
-  const [user, setUser] = useState<User | null | undefined>(undefined)
+  const [session, setSession] = useState<Session | undefined>(undefined)
 
   const refresh = useCallback(() => {
     currentUser()
-      .then(setUser)
-      .catch(() => setUser(null))
+      .then(async (user) => setSession(user ? { user, member: await isMember() } : null))
+      .catch(() => setSession(null))
   }, [])
   useEffect(refresh, [refresh])
 
@@ -24,16 +26,18 @@ export default function App() {
       <div className="vd-backdrop" aria-hidden="true">
         <span />
       </div>
-      {user === undefined ? (
+      {session === undefined ? (
         <div className="center-screen">
           <div className="spinner" aria-label="Cargando" />
         </div>
-      ) : user === null ? (
+      ) : session === null ? (
         <Login onSignedIn={refresh} />
+      ) : !session.member ? (
+        <AccessDenied email={session.user.email} />
       ) : docId ? (
-        <Editor key={docId} id={docId} user={user} />
+        <Editor key={docId} id={docId} user={session.user} />
       ) : (
-        <Library user={user} />
+        <Library user={session.user} />
       )}
     </ToastProvider>
   )

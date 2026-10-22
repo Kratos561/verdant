@@ -8,14 +8,18 @@ import {
   Star, Strikethrough, Underline as UnderlineIcon,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ySyncPluginKey } from '@tiptap/y-tiptap'
+import * as Y from 'yjs'
 import { MenuButton, Modal, avatarColor, initials, navigate, timeAgo, useTick, useToast } from '../components/ui'
 import type { User } from '../lib/auth'
 import { COURIER_STACK } from '../lib/fonts'
 import { IMPORT_ACCEPT, exportDocument, importFile } from '../lib/io-lazy'
 import type { ExportFormat } from '../lib/io-lazy'
-import { UNTITLED, store } from '../lib/store'
+import { EMPTY_DOC, UNTITLED, store } from '../lib/store'
 import type { Doc, DocSettings, Folder, Version } from '../lib/store'
-import { baseExtensions, contentToText, editorExtensions, htmlToContent } from '../editor/extensions'
+import { DocSync, REMOTE } from '../lib/sync'
+import type { SyncStatus } from '../lib/sync'
+import { baseExtensions, contentToText, contentToYDoc, editorExtensions, htmlToContent } from '../editor/extensions'
 import FindReplace from '../editor/FindReplace'
 import Outline from '../editor/Outline'
 import SidePanel from '../editor/SidePanel'
@@ -32,25 +36,66 @@ type Dialog = null | 'rename' | 'page' | 'words' | 'shortcuts' | 'link' | 'share
 const SAVE_DELAY = 700
 const SNAPSHOT_EVERY = 10 * 60 * 1000
 
+interface Live {
+  doc: Doc
+  ydoc: Y.Doc
+  sync: DocSync
+}
+
+interface Peer {
+  id: number
+  name: string
+  color: string
+}
+
+/** Estado Yjs inicial: contenido del documento + título y ajustes compartidos en el mapa `meta`. */
+function seedYDoc(doc: Doc): Y.Doc {
+  let ydoc: Y.Doc
+  try {
+    ydoc = contentToYDoc(doc.content ?? EMPTY_DOC)
+  } catch {
+    ydoc = contentToYDoc(EMPTY_DOC)
+  }
+  const meta = ydoc.getMap('meta')
+  meta.set('title', doc.title)
+  meta.set('settings', doc.settings ?? {})
+  return ydoc
+}
+
 export default function EditorPage({ id, user }: { id: string; user: User }) {
-  const [doc, setDoc] = useState<Doc | null | undefined>(undefined)
+  const [live, setLive] = useState<Live | null | undefined>(undefined)
   useEffect(() => {
-    store.getDoc(id).then(setDoc).catch(() => setDoc(null))
+    let cancelled = false
+    let sync: DocSync | null = null
+    ;(async () => {
+      const doc = await store.getDoc(id)
+      if (!doc || doc.trashed_at) return void (cancelled || setLive(null))
+      const ydoc = new Y.Doc()
+      sync = new DocSync(ydoc, doc.id, store.transport)
+      // El editor se monta cuando el estado ya está cargado; si no, Yjs duplicaría el párrafo inicial.
+      await sync.start(() => seedYDoc(doc))
+      if (cancelled) return void sync.stop()
+      setLive({ doc, ydoc, sync })
+    })().catch(() => cancelled || setLive(null))
+    return () => {
+      cancelled = true
+      void sync?.stop()
+    }
   }, [id])
 
-  if (doc === undefined) {
+  if (live === undefined) {
     return (
       <div className="center-screen">
         <div className="spinner" aria-label="Abriendo documento" />
       </div>
     )
   }
-  if (doc === null || doc.trashed_at) {
+  if (live === null) {
     return (
       <div className="center-screen">
         <div className="glass-float modal">
-          <h2>No encontramos este documento</h2>
-          <p>Puede que se haya eliminado o que no tengas acceso.</p>
+          <h2>No pudimos abrir este documento</h2>
+          <p>Puede que se haya eliminado, que esté en la papelera o que no haya conexión.</p>
           <div className="modal-actions">
             <button className="btn btn-primary" onClick={() => navigate('/')}>Ir a la biblioteca</button>
           </div>
@@ -58,14 +103,24 @@ export default function EditorPage({ id, user }: { id: string; user: User }) {
       </div>
     )
   }
-  return <Workspace initial={doc} user={user} />
+  return <Workspace live={live} user={user} />
 }
 
-function Workspace({ initial, user }: { initial: Doc; user: User }) {
+function Workspace({ live, user }: { live: Live; user: User }) {
   useTick(5000)
   const toast = useToast()
-  const [doc, setDoc] = useState(initial)
-  const [title, setTitle] = useState(initial.title)
+  const initial = live.doc
+  const meta = useMemo(() => live.ydoc.getMap<unknown>('meta'), [live])
+  const [doc, setDoc] = useState<Doc>(() => ({
+    ...initial,
+    title: (meta.get('title') as string | undefined) ?? initial.title,
+    settings: (meta.get('settings') as DocSettings | undefined) ?? initial.settings,
+  }))
+  const [title, setTitle] = useState(doc.title)
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(live.sync.status)
+  const [peers, setPeers] = useState<Peer[]>([])
+  const [commentsRev, setCommentsRev] = useState(0)
+  const titleFocused = useRef(false)
   const [save, setSave] = useState<SaveState>('saved')
   const [savedAt, setSavedAt] = useState(Date.parse(initial.updated_at))
   const [mode, setMode] = useState<EditorMode>('edit')
@@ -101,27 +156,63 @@ function Workspace({ initial, user }: { initial: Doc; user: User }) {
         lastSnapshot.current = Date.now()
         await store.createVersion(doc.id, { title, content, label: null })
         setVersionsKey((k) => k + 1)
+        meta.set('versionsRev', Date.now())
       }
     } catch {
       setSave('error')
     }
-  }, [doc.id, title])
+  }, [doc.id, title, meta])
 
   const persistRef = useRef(persist)
   persistRef.current = persist
 
+  const caretUser = useMemo(() => ({ name: user.name, color: avatarColor(`${user.id}:${live.ydoc.clientID}`) }), [user, live])
   const editor = useEditor({
-    extensions: [...editorExtensions(), SlashCommand],
-    content: initial.content,
+    extensions: [...editorExtensions(live.ydoc, live.sync.awareness, caretUser), SlashCommand],
     autofocus: initial.text_plain ? false : 'start',
     editorProps: { attributes: { class: 'vd-prose', spellcheck: 'true', 'aria-label': 'Contenido del documento' } },
-    onUpdate: () => {
+    onUpdate: ({ transaction }) => {
+      // Los cambios que llegan de otro cliente ya los guarda quien los hizo.
+      if ((transaction.getMeta(ySyncPluginKey) as { isChangeOrigin?: boolean } | undefined)?.isChangeOrigin) return
       setSave('dirty')
       clearTimeout(timer.current)
       timer.current = window.setTimeout(() => persistRef.current(), SAVE_DELAY)
     },
   })
   editorRef.current = editor
+
+  // Estado de la conexión y quién más está en el documento.
+  useEffect(() => live.sync.onStatus(setSyncStatus), [live])
+  useEffect(() => {
+    const aw = live.sync.awareness
+    const read = () =>
+      setPeers(
+        [...aw.getStates()]
+          .filter(([id, s]) => id !== live.ydoc.clientID && s.user)
+          .map(([id, s]) => ({ id, name: String(s.user.name ?? '?'), color: String(s.user.color ?? '#3ddc97') })),
+      )
+    aw.on('change', read)
+    read()
+    return () => aw.off('change', read)
+  }, [live])
+
+  // Título, ajustes y avisos de comentarios o versiones viajan por el mapa compartido `meta`.
+  useEffect(() => {
+    const on = (e: Y.YMapEvent<unknown>) => {
+      if (e.transaction.origin !== REMOTE) return
+      if (e.keysChanged.has('title') && !titleFocused.current) {
+        const t = String(meta.get('title') ?? UNTITLED)
+        setTitle(t)
+        setDoc((d) => ({ ...d, title: t }))
+      }
+      if (e.keysChanged.has('settings')) setDoc((d) => ({ ...d, settings: (meta.get('settings') as DocSettings) ?? {} }))
+      if (e.keysChanged.has('commentsRev')) setCommentsRev((n) => n + 1)
+      if (e.keysChanged.has('versionsRev')) setVersionsKey((n) => n + 1)
+    }
+    meta.observe(on)
+    return () => meta.unobserve(on)
+  }, [meta])
+  const announce = useCallback((key: 'commentsRev' | 'versionsRev') => meta.set(key, Date.now()), [meta])
 
   useEffect(() => {
     editor?.setEditable(mode === 'edit')
@@ -138,7 +229,10 @@ function Workspace({ initial, user }: { initial: Doc; user: User }) {
 
   // Guarda lo pendiente al salir de la página o al ocultar la pestaña.
   useEffect(() => {
-    const flush = () => save !== 'saved' && persistRef.current()
+    const flush = () => {
+      void live.sync.flush()
+      if (save !== 'saved') void persistRef.current()
+    }
     const onHide = () => document.visibilityState === 'hidden' && flush()
     addEventListener('beforeunload', flush)
     document.addEventListener('visibilitychange', onHide)
@@ -146,7 +240,7 @@ function Workspace({ initial, user }: { initial: Doc; user: User }) {
       removeEventListener('beforeunload', flush)
       document.removeEventListener('visibilitychange', onHide)
     }
-  }, [save])
+  }, [save, live])
   useEffect(() => () => void persistRef.current(), [])
 
   const patchDoc = useCallback(
@@ -164,12 +258,18 @@ function Workspace({ initial, user }: { initial: Doc; user: User }) {
     [doc, toast],
   )
 
-  const setSettings = (p: Partial<DocSettings>) => patchDoc({ settings: { ...settings, ...p } })
+  const setSettings = (p: Partial<DocSettings>) => {
+    const next = { ...settings, ...p }
+    meta.set('settings', next)
+    patchDoc({ settings: next })
+  }
 
   const commitTitle = (value = title) => {
     const t = value.trim() || UNTITLED
     setTitle(t)
-    if (t !== doc.title) patchDoc({ title: t })
+    if (t === doc.title) return
+    meta.set('title', t)
+    patchDoc({ title: t })
   }
 
   const startComment = useCallback(() => {
@@ -186,6 +286,7 @@ function Workspace({ initial, user }: { initial: Doc; user: User }) {
       await store.createVersion(doc.id, { title, content: editor.getJSON(), label: `Versión del ${new Date().toLocaleString('es', { dateStyle: 'medium', timeStyle: 'short' })}` })
       lastSnapshot.current = Date.now()
       setVersionsKey((k) => k + 1)
+      announce('versionsRev')
       setShowPanel(true)
       toast('Versión guardada')
     } catch (e) {
@@ -199,6 +300,7 @@ function Workspace({ initial, user }: { initial: Doc; user: User }) {
     editor.commands.setContent(v.content, { emitUpdate: true })
     setPreview(null)
     setVersionsKey((k) => k + 1)
+    announce('versionsRev')
     toast('Versión restaurada')
   }
 
@@ -302,7 +404,11 @@ function Workspace({ initial, user }: { initial: Doc; user: User }) {
             aria-label="Título del documento"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            onBlur={() => commitTitle()}
+            onFocus={() => (titleFocused.current = true)}
+            onBlur={() => {
+              titleFocused.current = false
+              commitTitle()
+            }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') (e.currentTarget.blur(), editor.commands.focus())
               if (e.key === 'Escape') (setTitle(doc.title), e.currentTarget.blur())
@@ -329,14 +435,29 @@ function Workspace({ initial, user }: { initial: Doc; user: User }) {
           </button>
         </div>
 
-        <SaveBadge state={save} savedAt={savedAt} storage={store.mode} onRetry={() => persist()} />
+        <SaveBadge
+          state={save}
+          sync={syncStatus}
+          savedAt={savedAt}
+          storage={store.mode}
+          onRetry={() => {
+            void live.sync.flush()
+            void persist()
+          }}
+        />
 
         <div className="ed-top-right">
           <button className="icon-btn ed-outline-btn" aria-label="Esquema" aria-pressed={showOutline} onClick={() => setShowOutline((v) => !v)}>
             <PanelLeft size={16} strokeWidth={1.75} />
           </button>
-          <div className="avatars" aria-label="Personas en el documento">
-            <span className="avatar" style={{ background: avatarColor(user.id) }} title={`${user.name} (tú)`}>
+          <div className="avatars" aria-label={`${peers.length + 1} ${peers.length ? 'personas' : 'persona'} en el documento`}>
+            {peers.slice(0, 4).map((p) => (
+              <span key={p.id} className="avatar avatar-peer" style={{ background: p.color }} title={`${p.name} · en este documento`}>
+                {initials(p.name)}
+              </span>
+            ))}
+            {peers.length > 4 && <span className="avatar avatar-more">+{peers.length - 4}</span>}
+            <span className="avatar" style={{ background: caretUser.color }} title={`${user.name} (tú)`}>
               {initials(user.name)}
             </span>
           </div>
@@ -385,6 +506,8 @@ function Workspace({ initial, user }: { initial: Doc; user: User }) {
             setMode={setMode}
             draft={draft}
             clearDraft={() => setDraft(null)}
+            commentsRev={commentsRev}
+            onCommentsChanged={() => announce('commentsRev')}
             versionsKey={versionsKey}
             onSaveVersion={saveVersion}
             onPreviewVersion={setPreview}
@@ -402,10 +525,24 @@ function Workspace({ initial, user }: { initial: Doc; user: User }) {
       <LinkDialog open={dialog === 'link'} editor={editor} onClose={() => setDialog(null)} />
       <Modal open={dialog === 'share'} onClose={() => setDialog(null)} title="Compartir">
         <p>
-          Por ahora cada documento es privado: solo tú puedes abrirlo. Compartir con personas, roles (lector, comentarista, editor)
-          y edición en tiempo real llegan en la fase de colaboración.
+          Verdant es privado: solo entran las cuentas autorizadas. Quien abra este documento con una de ellas, en otro
+          dispositivo o pestaña, lo edita contigo en tiempo real y verás su cursor.
         </p>
-        <p>Mientras tanto puedes descargarlo y enviarlo:</p>
+        <div className="share-link">
+          <input className="input" readOnly value={location.href} aria-label="Enlace del documento" onFocus={(e) => e.currentTarget.select()} />
+          <button
+            className="btn"
+            onClick={() =>
+              navigator.clipboard
+                .writeText(location.href)
+                .then(() => toast('Enlace copiado'))
+                .catch(() => toast('No se pudo copiar el enlace', { error: true }))
+            }
+          >
+            Copiar enlace
+          </button>
+        </div>
+        <p>Para enviarlo a alguien sin cuenta, descárgalo:</p>
         <div className="share-formats">
           {(['docx', 'pdf', 'md', 'html'] as const).map((f) => (
             <button key={f} className="btn" onClick={() => (exportAs(f), setDialog(null))}>.{f}</button>
@@ -449,15 +586,15 @@ function Workspace({ initial, user }: { initial: Doc; user: User }) {
   )
 }
 
-function SaveBadge({ state, savedAt, storage, onRetry }: { state: SaveState; savedAt: number; storage: 'neon' | 'local'; onRetry: () => void }) {
-  if (state === 'error') {
+function SaveBadge(p: { state: SaveState; sync: SyncStatus; savedAt: number; storage: 'neon' | 'local'; onRetry: () => void }) {
+  if (p.sync === 'offline' || p.state === 'error') {
     return (
-      <button className="save-badge is-error" onClick={onRetry}>
-        <CloudOff size={14} /> Sin guardar · reintentar
+      <button className="save-badge is-error" onClick={p.onRetry} title="Los cambios siguen en este dispositivo y se enviarán al recuperar la conexión">
+        <CloudOff size={14} /> Sin conexión · reintentar
       </button>
     )
   }
-  if (state === 'saving' || state === 'dirty') {
+  if (p.sync === 'pending' || p.state === 'saving' || p.state === 'dirty') {
     return (
       <span className="save-badge" aria-live="polite">
         <Loader2 size={14} className="spin" /> Guardando…
@@ -465,8 +602,16 @@ function SaveBadge({ state, savedAt, storage, onRetry }: { state: SaveState; sav
     )
   }
   return (
-    <span className="save-badge is-ok" aria-live="polite" title={new Date(savedAt).toLocaleString('es')}>
-      <Cloud size={14} /> {storage === 'neon' ? 'Sincronizado' : 'Guardado en este navegador'} · {timeAgo(savedAt)}
+    <span className="save-badge is-ok" aria-live="polite" title={`Último guardado: ${new Date(p.savedAt).toLocaleString('es')}`}>
+      {p.storage === 'neon' ? (
+        <>
+          <span className="live-dot" aria-hidden /> En vivo · guardado {timeAgo(p.savedAt)}
+        </>
+      ) : (
+        <>
+          <Cloud size={14} /> Guardado en este navegador · {timeAgo(p.savedAt)}
+        </>
+      )}
     </span>
   )
 }

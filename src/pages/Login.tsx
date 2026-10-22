@@ -1,16 +1,12 @@
-// Pantalla de acceso: iniciar sesión o crear cuenta.
+// Pantalla de acceso. Verdant es privado: no hay alta de cuentas desde la web.
 import { useState } from 'react'
 import type { FormEvent } from 'react'
-import { Eye, EyeOff } from 'lucide-react'
-import { signIn, signUp } from '../lib/auth'
+import { Eye, EyeOff, Lock } from 'lucide-react'
+import { signIn, signOut } from '../lib/auth'
 import { Logo } from './Library'
 import '../styles/library.css'
 
-type Mode = 'in' | 'up'
-
 export default function Login({ onSignedIn }: { onSignedIn: () => void }) {
-  const [mode, setMode] = useState<Mode>('in')
-  const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [show, setShow] = useState(false)
@@ -21,24 +17,14 @@ export default function Login({ onSignedIn }: { onSignedIn: () => void }) {
     e.preventDefault()
     if (busy) return
     setError('')
-    if (mode === 'up' && password.length < 8) {
-      setError('La contraseña debe tener al menos 8 caracteres.')
-      return
-    }
     setBusy(true)
     try {
-      if (mode === 'in') await signIn(email.trim(), password)
-      else await signUp(name.trim() || email.trim().split('@')[0], email.trim(), password)
+      await signIn(email.trim(), password)
       onSignedIn()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'No se pudo completar la operación.')
+      setError(err instanceof Error ? err.message : 'No se pudo iniciar sesión.')
       setBusy(false)
     }
-  }
-
-  const switchMode = (m: Mode) => {
-    setMode(m)
-    setError('')
   }
 
   return (
@@ -46,29 +32,14 @@ export default function Login({ onSignedIn }: { onSignedIn: () => void }) {
       <div className="login-card glass-float">
         <div className="login-brand">
           <Logo size={34} />
-          <h1>Bienvenido a Verdant</h1>
-          <p>{mode === 'in' ? 'Qué bueno verte de nuevo. Tus documentos te esperan.' : 'Crea tu cuenta y empieza a escribir en segundos.'}</p>
-        </div>
-
-        <div className="login-tabs" role="tablist" aria-label="Acceso">
-          <button type="button" role="tab" aria-selected={mode === 'in'} className={mode === 'in' ? 'is-on' : ''} onClick={() => switchMode('in')}>
-            Iniciar sesión
-          </button>
-          <button type="button" role="tab" aria-selected={mode === 'up'} className={mode === 'up' ? 'is-on' : ''} onClick={() => switchMode('up')}>
-            Crear cuenta
-          </button>
+          <h1>Verdant</h1>
+          <p>Espacio privado. Entra con la cuenta que tiene acceso.</p>
         </div>
 
         <form className="login-form" onSubmit={submit}>
-          {mode === 'up' && (
-            <label className="login-field">
-              <span>Nombre</span>
-              <input className="input" type="text" autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Cómo te llamas" required />
-            </label>
-          )}
           <label className="login-field">
             <span>Correo</span>
-            <input className="input" type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="tu@correo.com" required />
+            <input className="input" type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="tu@correo.com" required />
           </label>
           <label className="login-field">
             <span>Contraseña</span>
@@ -76,11 +47,9 @@ export default function Login({ onSignedIn }: { onSignedIn: () => void }) {
               <input
                 className="input"
                 type={show ? 'text' : 'password'}
-                autoComplete={mode === 'in' ? 'current-password' : 'new-password'}
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Mínimo 8 caracteres"
-                minLength={8}
                 required
               />
               <button type="button" className="icon-btn" aria-label={show ? 'Ocultar contraseña' : 'Mostrar contraseña'} onClick={() => setShow((s) => !s)}>
@@ -91,7 +60,7 @@ export default function Login({ onSignedIn }: { onSignedIn: () => void }) {
 
           <button type="submit" className="btn btn-primary login-submit" disabled={busy}>
             {busy && <span className="spinner login-spin" />}
-            {mode === 'in' ? 'Entrar' : 'Crear cuenta'}
+            Entrar
           </button>
           {error && (
             <div className="login-error" role="alert">
@@ -99,6 +68,27 @@ export default function Login({ onSignedIn }: { onSignedIn: () => void }) {
             </div>
           )}
         </form>
+        <p className="login-private">
+          <Lock size={13} strokeWidth={1.75} /> El registro está cerrado. Solo las cuentas autorizadas pueden entrar.
+        </p>
+      </div>
+    </main>
+  )
+}
+
+/** Sesión válida pero sin permiso: RLS ya bloquea los datos; aquí se explica y se ofrece salir. */
+export function AccessDenied({ email }: { email: string }) {
+  return (
+    <main className="login-wrap">
+      <div className="login-card glass-float">
+        <div className="login-brand">
+          <Logo size={34} />
+          <h1>Sin acceso</h1>
+          <p>La cuenta {email} no está autorizada para usar este Verdant.</p>
+        </div>
+        <button className="btn btn-primary login-submit" onClick={() => signOut().then(() => location.reload())}>
+          Cerrar sesión
+        </button>
       </div>
     </main>
   )

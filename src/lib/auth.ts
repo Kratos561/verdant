@@ -48,8 +48,12 @@ export async function signIn(email: string, password: string): Promise<void> {
   check((await neonClient!.auth.signIn.email({ email, password })) as AuthResult)
 }
 
-export async function signUp(name: string, email: string, password: string): Promise<void> {
-  check((await neonClient!.auth.signUp.email({ name, email, password })) as AuthResult)
+/** Verdant es privado: solo las cuentas de app_members ven datos (lo impone RLS en Postgres). */
+export async function isMember(): Promise<boolean> {
+  if (!neonClient) return true
+  const r = (await neonClient.rpc('is_member')) as { data: unknown; error: { message: string } | null }
+  if (r.error) throw new Error(r.error.message)
+  return r.data === true
 }
 
 export async function signOut(): Promise<void> {

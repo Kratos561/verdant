@@ -2,6 +2,8 @@
 // sin ella guarda todo en IndexedDB para que Verdant funcione en local y sin conexión.
 import type { JSONContent } from '@tiptap/react'
 import { neonClient } from './auth'
+import type { PresenceRow, SyncTransport, UpdateRow } from './sync'
+import { neonTransport } from './transport-neon'
 
 export interface DocSettings {
   font?: string
@@ -23,6 +25,9 @@ export interface DocMeta {
 export interface Doc extends DocMeta {
   content: JSONContent
   settings: DocSettings
+  /** Estado Yjs compactado (base64) y última actualización que incluye; los gestiona sync.ts. */
+  ydoc?: string | null
+  ydoc_seq?: number
 }
 
 export interface Folder {
@@ -58,6 +63,7 @@ export type NewComment = Pick<Comment, 'document_id' | 'quote' | 'body' | 'autho
 
 export interface Store {
   mode: 'neon' | 'local'
+  transport: SyncTransport
   listDocs(): Promise<DocMeta[]>
   getDoc(id: string): Promise<Doc | null>
   createDoc(init?: NewDoc): Promise<Doc>
@@ -78,6 +84,7 @@ export interface Store {
 export const EMPTY_DOC: JSONContent = { type: 'doc', content: [{ type: 'paragraph' }] }
 export const UNTITLED = 'Documento sin título'
 const META = 'id,title,text_plain,starred,trashed_at,folder_id,created_at,updated_at'
+const FULL = `${META},content,settings`
 
 // ---------- Neon (Data API) ----------
 
@@ -95,15 +102,16 @@ function neonStore(): Store {
   const db = neonClient!
   return {
     mode: 'neon',
+    transport: neonTransport(db),
     async listDocs() {
       return unwrap<DocMeta[]>(await db.from('documents').select(META).order('updated_at', { ascending: false }))
     },
     async getDoc(id) {
-      return unwrap<Doc | null>(await db.from('documents').select('*').eq('id', id).maybeSingle())
+      return unwrap<Doc | null>(await db.from('documents').select(FULL).eq('id', id).maybeSingle())
     },
     async createDoc(init = {}) {
       const row = { title: UNTITLED, content: EMPTY_DOC, settings: {}, ...init }
-      return unwrap<Doc>(await db.from('documents').insert(row).select('*').single())
+      return unwrap<Doc>(await db.from('documents').insert(row).select(FULL).single())
     },
     async updateDoc(id, patch) {
       unwrap(await db.from('documents').update(patch).eq('id', id))
@@ -148,16 +156,21 @@ function neonStore(): Store {
 
 // ---------- Local (IndexedDB) ----------
 
-type Collection = 'documents' | 'folders' | 'versions' | 'comments'
+type Collection = 'documents' | 'folders' | 'versions' | 'comments' | 'updates' | 'presence'
 
 let dbPromise: Promise<IDBDatabase> | null = null
 function idb(): Promise<IDBDatabase> {
   dbPromise ??= new Promise((resolve, reject) => {
-    const req = indexedDB.open('verdant', 1)
+    const req = indexedDB.open('verdant', 2)
     req.onupgradeneeded = () => {
+      const db = req.result
       for (const name of ['documents', 'folders', 'versions', 'comments']) {
-        if (!req.result.objectStoreNames.contains(name)) req.result.createObjectStore(name, { keyPath: 'id' })
+        if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: 'id' })
       }
+      if (!db.objectStoreNames.contains('updates')) {
+        db.createObjectStore('updates', { keyPath: 'id', autoIncrement: true }).createIndex('doc', 'doc_id')
+      }
+      if (!db.objectStoreNames.contains('presence')) db.createObjectStore('presence', { keyPath: 'key' })
     }
     req.onsuccess = () => resolve(req.result)
     req.onerror = () => reject(req.error)
@@ -177,12 +190,86 @@ async function tx<T>(name: Collection, mode: IDBTransactionMode, fn: (s: IDBObje
 const all = <T>(name: Collection) => tx<T[]>(name, 'readonly', (s) => s.getAll())
 const one = <T>(name: Collection, id: string) => tx<T | undefined>(name, 'readonly', (s) => s.get(id))
 const put = <T>(name: Collection, value: T) => tx<IDBValidKey>(name, 'readwrite', (s) => s.put(value))
-const remove = (name: Collection, id: string) => tx<undefined>(name, 'readwrite', (s) => s.delete(id))
+const remove = (name: Collection, id: IDBValidKey) => tx<undefined>(name, 'readwrite', (s) => s.delete(id))
 const now = () => new Date().toISOString()
+
+interface LocalUpdate extends UpdateRow {
+  doc_id: string
+  created_at: number
+}
+
+interface LocalPresence extends PresenceRow {
+  key: string
+  doc_id: string
+  updated_at: number
+}
+
+const updatesOf = (docId: string) =>
+  tx<LocalUpdate[]>('updates', 'readonly', (s) => s.index('doc').getAll(IDBKeyRange.only(docId)))
+
+/** Lee y reescribe un documento en una sola transacción (otras pestañas no se cuelan en medio). */
+async function rewriteDoc(id: string, fn: (d: Doc) => Doc | null): Promise<boolean> {
+  const db = await idb()
+  return new Promise((resolve, reject) => {
+    const t = db.transaction('documents', 'readwrite')
+    const s = t.objectStore('documents')
+    let changed = false
+    const get = s.get(id)
+    get.onsuccess = () => {
+      const next = get.result ? fn(get.result as Doc) : null
+      if (next) {
+        s.put(next)
+        changed = true
+      }
+    }
+    t.oncomplete = () => resolve(changed)
+    t.onerror = () => reject(t.error)
+  })
+}
+
+// Mismo protocolo que Neon sobre IndexedDB: las pestañas del mismo navegador colaboran en vivo.
+function localTransport(): SyncTransport {
+  return {
+    async loadSnapshot(docId) {
+      const d = await one<Doc>('documents', docId)
+      return { ydoc: d?.ydoc ?? null, ydoc_seq: d?.ydoc_seq ?? 0 }
+    },
+    seedSnapshot: (docId, data) => rewriteDoc(docId, (d) => (d.ydoc ? null : { ...d, ydoc: data, ydoc_seq: 0 })),
+    async saveSnapshot(docId, data, seq) {
+      await rewriteDoc(docId, (d) => ((d.ydoc_seq ?? 0) < seq ? { ...d, ydoc: data, ydoc_seq: seq } : null))
+    },
+    async pruneUpdates(docId, uptoSeq, olderThan) {
+      for (const u of await updatesOf(docId)) {
+        if (u.id <= uptoSeq && u.created_at < olderThan.getTime()) await remove('updates', u.id)
+      }
+    },
+    async pushUpdate(docId, clientId, data) {
+      return Number(await put('updates', { doc_id: docId, client_id: clientId, data, created_at: Date.now() }))
+    },
+    async pullUpdates(docId, afterId, limit) {
+      return (await updatesOf(docId))
+        .filter((u) => u.id > afterId)
+        .sort((a, b) => a.id - b.id)
+        .slice(0, limit)
+    },
+    async putPresence(docId, clientId, state) {
+      const row: LocalPresence = { key: `${docId}:${clientId}`, doc_id: docId, client_id: clientId, state, updated_at: Date.now() }
+      await put('presence', row)
+    },
+    async pullPresence(docId) {
+      const fresh = Date.now() - 30_000
+      return (await all<LocalPresence>('presence')).filter((p) => p.doc_id === docId && p.updated_at > fresh)
+    },
+    async dropPresence(docId, clientId) {
+      await remove('presence', `${docId}:${clientId}`)
+    },
+  }
+}
 
 function localStore(): Store {
   return {
     mode: 'local',
+    transport: localTransport(),
     async listDocs() {
       const docs = await all<Doc>('documents')
       return docs
@@ -215,6 +302,7 @@ function localStore(): Store {
     },
     async deleteDoc(id) {
       await remove('documents', id)
+      for (const u of await updatesOf(id)) await remove('updates', u.id)
       for (const v of await all<Version>('versions')) if (v.document_id === id) await remove('versions', v.id)
       for (const c of await all<Comment>('comments')) if (c.document_id === id) await remove('comments', c.id)
     },
