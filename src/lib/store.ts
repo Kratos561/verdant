@@ -19,6 +19,28 @@ export interface DocSettings {
   sheet?: 'dark' | 'paper'
   /** 'word': títulos y espaciado salen del propio documento (importado de Word), no del estilo de Verdant. */
   layout?: 'verdant' | 'word'
+  /** Tamaño y márgenes de la hoja en pt; sin valor, A4 o Carta con márgenes de 2,54 cm. */
+  page?: PageSetup
+  /** Encabezado y pie de cada hoja; {pagina} y {paginas} se sustituyen al mostrarlos. */
+  header?: HeaderFooter
+  footer?: HeaderFooter
+}
+
+export interface PageSetup {
+  width: number
+  height: number
+  top: number
+  right: number
+  bottom: number
+  left: number
+  /** Distancia del borde al encabezado y al pie. */
+  header?: number
+  footer?: number
+}
+
+export interface HeaderFooter {
+  text: string
+  align?: 'left' | 'center' | 'right'
 }
 
 export interface DocMeta {

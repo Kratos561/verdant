@@ -26,6 +26,9 @@ import SidePanel from '../editor/SidePanel'
 import type { CommentDraft } from '../editor/SidePanel'
 import { SlashCommand } from '../editor/SlashCommand'
 import Toolbar from '../editor/Toolbar'
+import { PAGINATION_REFRESH, Pagination } from '../editor/Pagination'
+import type { PageGeometry } from '../editor/Pagination'
+import { PAGE_GAP, PAPER, fillPageTokens, pageBox, pageSetup } from '../editor/page'
 import type { EditorMode } from '../editor/Toolbar'
 import { Logo } from './Library'
 import '../styles/editor.css'
@@ -168,9 +171,22 @@ function Workspace({ live, user }: { live: Live; user: User }) {
   const persistRef = useRef(persist)
   persistRef.current = persist
 
+  // Paginación: la geometría vive en un ref para que el plugin la lea sin recrear el editor.
+  const [pages, setPages] = useState(1)
+  const [canvasWidth, setCanvasWidth] = useState(0)
+  const canvasRef = useRef<HTMLElement | null>(null)
+  const box = pageBox(doc.settings)
+  const pagedView = doc.settings.pageMode === 'paged' && innerWidth >= 760
+  const geometry = useRef<PageGeometry | null>(null)
+  geometry.current = pagedView ? { height: box.h, marginTop: box.top, marginBottom: box.bottom, gap: PAGE_GAP } : null
+
   const caretUser = useMemo(() => ({ name: user.name, color: avatarColor(`${user.id}:${live.ydoc.clientID}`) }), [user, live])
   const editor = useEditor({
-    extensions: [...editorExtensions(live.ydoc, live.sync.awareness, caretUser), SlashCommand],
+    extensions: [
+      ...editorExtensions(live.ydoc, live.sync.awareness, caretUser),
+      SlashCommand,
+      Pagination.configure({ geometry: () => geometry.current, onPages: setPages }),
+    ],
     autofocus: initial.text_plain ? false : 'start',
     editorProps: { attributes: { class: 'vd-prose', spellcheck: 'true', 'aria-label': 'Contenido del documento' } },
     onUpdate: ({ transaction }) => {
@@ -182,6 +198,19 @@ function Workspace({ live, user }: { live: Live; user: User }) {
     },
   })
   editorRef.current = editor
+
+  // Recalcula las hojas cuando cambian el diseño, el tamaño o los márgenes.
+  const geometryKey = JSON.stringify(geometry.current)
+  useEffect(() => {
+    editor?.view.dispatch(editor.state.tr.setMeta(PAGINATION_REFRESH, true))
+  }, [editor, geometryKey])
+  useEffect(() => {
+    const el = canvasRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => setCanvasWidth(el.clientWidth))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [editor])
 
   // Estado de la conexión y quién más está en el documento.
   useEffect(() => live.sync.onStatus(setSyncStatus), [live])
@@ -395,7 +424,10 @@ function Workspace({ live, user }: { live: Live; user: User }) {
     error: (msg: string) => toast(msg, { error: true }),
   }
 
-  const paged = settings.pageMode === 'paged'
+  const paged = pagedView
+  // Si la hoja no cabe a lo ancho, se reduce (como el zoom de Word) sin alterar la medición.
+  const scale = paged && canvasWidth ? Math.min(1, (canvasWidth - 24) / box.w) : 1
+  const pagesHeight = pages * (box.h + PAGE_GAP) - PAGE_GAP
 
   return (
     <div className={`ed${focusMode ? ' is-focus' : ''}${showOutline ? ' has-outline' : ''}${showPanel ? ' has-panel' : ''}`}>
@@ -491,14 +523,44 @@ function Workspace({ live, user }: { live: Live; user: User }) {
       <div className="ed-body">
         {showOutline && <Outline editor={editor} doc={{ ...doc, title }} storage={store.mode} />}
 
-        <main className="ed-canvas" onMouseDown={(e) => e.target === e.currentTarget && editor.commands.focus('end')}>
+        <main ref={canvasRef} className="ed-canvas" onMouseDown={(e) => e.target === e.currentTarget && editor.commands.focus('end')}>
           {finding && <FindReplace editor={editor} readOnly={mode === 'view'} onClose={() => setFinding(false)} />}
-          <article
-            className={`sheet${paged ? ' is-paged' : ''}${settings.paper === 'letter' ? ' is-letter' : ''}${settings.sheet === 'paper' ? ' is-paper' : ''}${settings.layout === 'word' ? ' is-word' : ''}`}
-            style={sheetVars(settings, docFont)}
-          >
-            <EditorContent editor={editor} />
-          </article>
+          <div className="sheet-scaler" style={paged ? { width: box.w * scale, height: pagesHeight * scale } : undefined}>
+            <article
+              className={`sheet${paged ? ' is-paged' : ''}${settings.sheet === 'paper' ? ' is-paper' : ''}${settings.layout === 'word' ? ' is-word' : ''}`}
+              style={
+                paged
+                  ? {
+                      ...sheetVars(settings, docFont),
+                      width: box.w,
+                      minHeight: pagesHeight,
+                      padding: `${box.top}px ${box.right}px 0 ${box.left}px`,
+                      transform: scale < 1 ? `scale(${scale})` : undefined,
+                    }
+                  : sheetVars(settings, docFont)
+              }
+            >
+              {paged && (
+                <div className="page-layer" aria-hidden="true">
+                  {Array.from({ length: pages }, (_, i) => (
+                    <div key={i} className="page" style={{ top: i * (box.h + PAGE_GAP), height: box.h }}>
+                      {settings.header?.text && (
+                        <div className="page-hf" style={{ top: box.header, left: box.left, right: box.right, textAlign: settings.header.align ?? 'left' }}>
+                          {fillPageTokens(settings.header.text, i + 1, pages)}
+                        </div>
+                      )}
+                      {settings.footer?.text && (
+                        <div className="page-hf" style={{ bottom: box.footer, left: box.left, right: box.right, textAlign: settings.footer.align ?? 'center' }}>
+                          {fillPageTokens(settings.footer.text, i + 1, pages)}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <EditorContent editor={editor} />
+            </article>
+          </div>
         </main>
 
         {showPanel && (
@@ -694,8 +756,16 @@ function RenameDialog(p: { open: boolean; title: string; onClose: () => void; on
 function PageDialog(p: { open: boolean; settings: DocSettings; onClose: () => void; onSave: (s: Partial<DocSettings>) => void }) {
   const [s, setS] = useState(p.settings)
   useEffect(() => setS(p.settings), [p.settings, p.open])
+  const page = pageSetup(s)
+  const cm = (pt: number) => String(Math.round((pt / 28.3465) * 100) / 100)
+  const setMargin = (k: 'top' | 'right' | 'bottom' | 'left', v: string) => {
+    const n = parseFloat(v.replace(',', '.'))
+    if (!Number.isNaN(n) && n >= 0 && n < 10) setS({ ...s, page: { ...page, [k]: Math.round(n * 28.3465 * 10) / 10 } })
+  }
+  const setPaper = (paper: 'a4' | 'letter') => setS({ ...s, paper, page: { ...page, ...PAPER[paper] } })
+  const numbered = /\{pagina\}/i.test(s.footer?.text ?? '') || /\{pagina\}/i.test(s.header?.text ?? '')
   return (
-    <Modal open={p.open} onClose={p.onClose} title="Configurar página">
+    <Modal open={p.open} onClose={p.onClose} title="Configurar página" width={560}>
       <div className="form-grid">
         <span>Diseño</span>
         <div className="seg">
@@ -704,9 +774,48 @@ function PageDialog(p: { open: boolean; settings: DocSettings; onClose: () => vo
         </div>
         <span>Tamaño</span>
         <div className="seg">
-          <button className={s.paper !== 'letter' ? 'is-on' : ''} onClick={() => setS({ ...s, paper: 'a4' })}>A4</button>
-          <button className={s.paper === 'letter' ? 'is-on' : ''} onClick={() => setS({ ...s, paper: 'letter' })}>Carta</button>
+          <button className={Math.abs(page.width - PAPER.a4.width) < 2 ? 'is-on' : ''} onClick={() => setPaper('a4')}>A4</button>
+          <button className={Math.abs(page.width - PAPER.letter.width) < 2 ? 'is-on' : ''} onClick={() => setPaper('letter')}>Carta</button>
         </div>
+        <span>Márgenes (cm)</span>
+        <div className="margins">
+          {(['top', 'bottom', 'left', 'right'] as const).map((k) => (
+            <label key={k}>
+              <small>{{ top: 'Superior', bottom: 'Inferior', left: 'Izquierdo', right: 'Derecho' }[k]}</small>
+              <input className="input" inputMode="decimal" defaultValue={cm(page[k])} onChange={(e) => setMargin(k, e.target.value)} />
+            </label>
+          ))}
+        </div>
+        <span>Encabezado</span>
+        <input
+          className="input"
+          value={s.header?.text ?? ''}
+          placeholder="Texto en lo alto de cada hoja"
+          onChange={(e) => setS({ ...s, header: { align: s.header?.align ?? 'left', text: e.target.value } })}
+        />
+        <span>Pie de página</span>
+        <input
+          className="input"
+          value={s.footer?.text ?? ''}
+          placeholder="Usa {pagina} y {paginas} para numerar"
+          onChange={(e) => setS({ ...s, footer: { align: s.footer?.align ?? 'center', text: e.target.value } })}
+        />
+        <span />
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={numbered}
+            onChange={(e) =>
+              setS({
+                ...s,
+                footer: e.target.checked
+                  ? { align: s.footer?.align ?? 'center', text: `${s.footer?.text ? `${s.footer.text}  ` : ''}{pagina}` }
+                  : { align: s.footer?.align ?? 'center', text: (s.footer?.text ?? '').replace(/\s*\{pagina\}/gi, '') },
+              })
+            }
+          />
+          Numerar páginas
+        </label>
       </div>
       <div className="modal-actions">
         <button className="btn btn-ghost" onClick={p.onClose}>Cancelar</button>

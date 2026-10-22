@@ -71,15 +71,6 @@
   background: var(--page); color: var(--page-text); border-radius: 14px; border: 1px solid var(--line);
   box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.9), 0 1px 0 rgba(255, 255, 255, 0.04) inset;
 }
-/* Modo con páginas: alto de hoja y saltos dibujados (la paginación exacta llega en la fase 6). */
-.sheet.is-paged {
-  --page-h: 1123px;
-  max-width: 794px; min-height: var(--page-h); border-radius: 4px;
-  background:
-    repeating-linear-gradient(to bottom, transparent 0, transparent calc(var(--page-h) - 1px), rgba(255, 255, 255, 0.12) calc(var(--page-h) - 1px), rgba(255, 255, 255, 0.12) var(--page-h)),
-    var(--page);
-}
-.sheet.is-paged.is-letter { --page-h: 1056px; max-width: 816px; }
 
 /* Contenido del documento */
 .vd-prose { font-family: var(--doc-font); font-weight: 400; font-size: var(--doc-size, 12pt); line-height: var(--doc-line, 1.55); outline: none; min-height: 60vh; caret-color: var(--accent); overflow-wrap: break-word; }
@@ -321,11 +312,35 @@ kbd { font-family: var(--font-ui); font-size: 11px; padding: 1px 5px; border-rad
 .sheet.is-paper .vd-prose h5, .sheet.is-paper .vd-prose h6 { color: #4d5751; }
 .sheet.is-paper .vd-prose mark { background: #fff59d; }
 .sheet.is-paper .vd-prose .vd-comment { background: rgba(242, 201, 76, 0.35); }
-.sheet.is-paper.is-paged {
-  background:
-    repeating-linear-gradient(to bottom, transparent 0, transparent calc(var(--page-h) - 1px), rgba(0, 0, 0, 0.14) calc(var(--page-h) - 1px), rgba(0, 0, 0, 0.14) var(--page-h)),
-    var(--page);
-}
 
 /* En la hoja oscura, los fondos de celda de Word se atenúan para que el texto claro se siga leyendo */
 .sheet:not(.is-paper) .vd-prose [data-background] { background-color: color-mix(in srgb, var(--cell-bg) 22%, transparent) !important; }
+
+/* Vista con páginas: hojas separadas como en Word */
+.sheet-scaler { margin: 0 auto; }
+.sheet.is-paged {
+  position: relative; max-width: none; margin: 0; border: 0; border-radius: 0; box-shadow: none;
+  background: none !important; transform-origin: top left; box-sizing: border-box;
+}
+.page-layer { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+.page {
+  position: absolute; left: 0; right: 0; background: var(--page); border-radius: 4px;
+  box-shadow: 0 24px 60px -28px rgba(0, 0, 0, 0.95), 0 0 0 1px var(--line);
+}
+.sheet.is-paper .page { box-shadow: 0 24px 60px -28px rgba(0, 0, 0, 0.95), 0 0 0 1px rgba(255, 255, 255, 0.12); }
+.page-hf {
+  position: absolute; white-space: pre-wrap; font: 400 9.5pt/1.3 var(--doc-font); color: var(--page-text); opacity: 0.6;
+}
+.sheet.is-paged .vd-prose { position: relative; z-index: 1; min-height: 0; }
+.vd-prose .vd-page-gap { margin: 0 !important; pointer-events: none; }
+.vd-prose .vd-page-gap + * { margin-top: 0 !important; }
+.sheet.is-paged .vd-prose .vd-page-break { height: 0; margin: 0 !important; border: 0; }
+.sheet.is-paged .vd-prose .vd-page-break::after { display: none; }
+.sheet.is-paged .vd-prose .vd-page-break.ProseMirror-selectednode { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.margins { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.margins label { display: grid; gap: 4px; }
+.margins small { color: var(--text-3); font-size: 11px; }
+.margins .input { height: 32px; padding: 0 8px; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); }
+.check input { accent-color: var(--accent); }

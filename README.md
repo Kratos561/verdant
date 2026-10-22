@@ -23,6 +23,8 @@ Es una SPA estática en GitHub Pages que guarda los datos en Neon (Postgres) a t
 - **Guardado:** autoguardado, versiones automáticas cada 10 minutos de edición, versiones con nombre, vista previa y restauración.
 - **Comentarios:** anclados al texto, con respuestas, resolver y reabrir.
 - **Archivos:** importa .docx, .md, .txt y .html; exporta a .docx, .pdf (vía impresión), .md, .html y .txt.
+  - Word se importa con su formato: fuentes, tamaños, colores, alineación, sangrías, espaciado, listas, tablas, imágenes (también EMF/WMF), notas al pie, saltos de página, tamaño de hoja, márgenes, encabezado y pie con número de página.
+- **Vista con páginas:** hojas separadas como en Word, con el tamaño y los márgenes del documento; el texto pasa solo a la hoja siguiente y los saltos de página empiezan hoja nueva. Encabezado, pie y numeración desde Archivo → Configurar página.
 - **Modo local:** sin `VITE_NEON_URL`, todo se guarda en IndexedDB del navegador.
 
 ## Desarrollo

@@ -5,7 +5,7 @@
 import JSZip from 'jszip'
 import type { JSONContent } from '@tiptap/core'
 import { COURIER_STACK, FONTS } from './fonts'
-import type { DocSettings } from './store'
+import type { DocSettings, HeaderFooter, PageSetup } from './store'
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
@@ -348,6 +348,23 @@ async function shrink(bytes: Uint8Array, mime: string): Promise<string> {
     return smaller.length < original.length ? smaller : original
   } catch {
     return original
+  }
+}
+
+/** Dibuja un metarchivo de Windows (EMF/WMF) como SVG; el renderizador se descarga solo si hace falta. */
+async function metafileToSvg(bytes: Uint8Array, ext: 'emf' | 'wmf', width: number, height: number): Promise<string | null> {
+  try {
+    const mod = ext === 'emf' ? await import('rtf.js/dist/EMFJS.bundle.min.js') : await import('rtf.js/dist/WMFJS.bundle.min.js')
+    const Renderer = mod.Renderer ?? (mod as unknown as { default: { Renderer: typeof mod.Renderer } }).default.Renderer
+    const w = Math.round(width || 400)
+    const h = Math.round(height || 300)
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+    const svg = new Renderer(buffer).render({ width: `${w}px`, height: `${h}px`, wExt: w, hExt: h, xExt: w, yExt: h, mapMode: 8 })
+    svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+    const xml = new XMLSerializer().serializeToString(svg)
+    return `data:image/svg+xml;base64,${bytesToBase64(new TextEncoder().encode(xml))}`
+  } catch {
+    return null
   }
 }
 
@@ -735,11 +752,13 @@ class Converter {
     const ext = path.split('.').pop()?.toLowerCase() ?? ''
     const mime = IMAGE_MIME[ext]
     const file = this.zip.file(path)
-    if (!mime || !file) {
-      this.warnings.add(`Algunas imágenes están en un formato que el navegador no muestra (${ext.toUpperCase() || 'desconocido'}) y se omitieron.`)
+    let src: string | null = null
+    if (file && (ext === 'emf' || ext === 'wmf')) src = await metafileToSvg(await file.async('uint8array'), ext, width, height)
+    else if (file && mime) src = await shrink(await file.async('uint8array'), mime)
+    if (!src) {
+      this.warnings.add(`Algunas imágenes (${ext.toUpperCase() || 'formato desconocido'}) no se pudieron convertir y se omitieron.`)
       return
     }
-    const src = await shrink(await file.async('uint8array'), mime)
     const attrs: Record<string, unknown> = { src, alt: alt || null }
     if (width > 0) {
       const w = Math.min(width, 650)
@@ -913,15 +932,102 @@ export async function docxToContent(buffer: ArrayBuffer): Promise<DocxResult> {
 
   const blocks = await converter.body(body)
   if (!blocks.length) blocks.push({ type: 'paragraph' })
-  const settings = extractDefaults(blocks)
+  const settings: Partial<DocSettings> = { ...extractDefaults(blocks), pageMode: 'paged' }
 
-  const headers = Object.keys(zip.files).filter((f) => /^word\/(header|footer)\d*\.xml$/.test(f))
-  for (const h of headers) {
-    const text = (await readXml(zip, h))?.documentElement.textContent?.trim()
-    if (text) {
-      converter.warnings.add('Los encabezados y pies de página de Word no se importan.')
-      break
-    }
+  const sect = kids(body, 'sectPr').pop() ?? null
+  if (sect) {
+    const page = parseSection(sect)
+    if (page) settings.page = page
+    settings.header = await readHeaderFooter(zip, rels, sect, 'headerReference')
+    settings.footer = await readHeaderFooter(zip, rels, sect, 'footerReference')
   }
   return { content: { type: 'doc', content: blocks }, settings, warnings: [...converter.warnings] }
+}
+
+/** Tamaño y márgenes de la sección (twips → pt). */
+function parseSection(sect: Element): PageSetup | undefined {
+  const sz = kid(sect, 'pgSz')
+  const mar = kid(sect, 'pgMar')
+  const pt = (el: Element | null, name: string) => {
+    const v = attr(el, name)
+    return v === null ? undefined : Math.abs(Number(v)) / 20
+  }
+  const width = pt(sz, 'w')
+  const height = pt(sz, 'h')
+  if (!width || !height) return undefined
+  return {
+    width,
+    height,
+    top: pt(mar, 'top') ?? 72,
+    right: pt(mar, 'right') ?? 72,
+    bottom: pt(mar, 'bottom') ?? 72,
+    left: pt(mar, 'left') ?? 72,
+    header: pt(mar, 'header') ?? 36,
+    footer: pt(mar, 'footer') ?? 36,
+  }
+}
+
+/** Texto del encabezado o pie principal; los campos PAGE y NUMPAGES pasan a {pagina} y {paginas}. */
+async function readHeaderFooter(
+  zip: JSZip,
+  rels: Map<string, { target: string; external: boolean }>,
+  sect: Element,
+  tag: 'headerReference' | 'footerReference',
+): Promise<HeaderFooter | undefined> {
+  const refs = kids(sect, tag)
+  const ref = refs.find((r) => attr(r, 'type') === 'default') ?? refs[0]
+  const rel = ref ? rels.get(relId(ref, 'id') ?? '') : undefined
+  if (!rel) return undefined
+  const doc = await readXml(zip, normalizePath(`word/${rel.target}`))
+  if (!doc) return undefined
+  const token = (instr: string) => (/\bNUMPAGES\b/i.test(instr) ? '{paginas}' : /\bPAGE\b/i.test(instr) ? '{pagina}' : '')
+  const lines: string[] = []
+  let align: HeaderFooter['align']
+  for (const p of Array.from(doc.getElementsByTagNameNS(W, 'p'))) {
+    let text = ''
+    let instr = ''
+    let state: 'none' | 'instr' | 'result' = 'none'
+    const walk = (el: Element) => {
+      for (const c of kids(el)) {
+        switch (c.localName) {
+          case 'pPr':
+          case 'rPr':
+            break
+          case 'fldSimple':
+            text += token(attr(c, 'instr') ?? '')
+            break
+          case 'fldChar': {
+            const t = attr(c, 'fldCharType')
+            if (t === 'begin') (state = 'instr'), (instr = '')
+            else if (t === 'separate') (text += token(instr)), (state = 'result')
+            else if (t === 'end') {
+              if (state === 'instr') text += token(instr)
+              state = 'none'
+            }
+            break
+          }
+          case 'instrText':
+            instr += c.textContent ?? ''
+            break
+          case 't':
+            if (state === 'none') text += c.textContent ?? ''
+            break
+          case 'tab':
+            if (state === 'none') text += '\t'
+            break
+          default:
+            walk(c)
+        }
+      }
+    }
+    walk(p)
+    if (text.trim()) {
+      lines.push(text)
+      if (!align) {
+        const jc = attr(kid(kid(p, 'pPr'), 'jc'), 'val')
+        align = jc === 'center' ? 'center' : jc === 'right' || jc === 'end' ? 'right' : 'left'
+      }
+    }
+  }
+  return lines.length ? { text: lines.join('\n'), align } : undefined
 }
