@@ -54,7 +54,9 @@ function seedYDoc(doc: Doc): Y.Doc {
   try {
     ydoc = contentToYDoc(doc.content ?? EMPTY_DOC)
   } catch {
-    ydoc = contentToYDoc(EMPTY_DOC)
+    // Si el JSON no encaja con el esquema, se repara pasando por HTML; si tampoco, se aborta
+    // (mejor un error visible que guardar un documento vacío encima del contenido).
+    ydoc = contentToYDoc(htmlToContent(generateHTML(doc.content, baseExtensions())))
   }
   const meta = ydoc.getMap('meta')
   meta.set('title', doc.title)
@@ -306,7 +308,7 @@ function Workspace({ live, user }: { live: Live; user: User }) {
 
   const exportAs = (format: ExportFormat) => {
     if (!editor) return
-    exportDocument(format, { title, html: editor.getHTML(), json: editor.getJSON(), text: editor.getText() }).catch((e) =>
+    exportDocument(format, { title, html: editor.getHTML(), json: editor.getJSON(), text: editor.getText(), settings }).catch((e) =>
       toast(`No se pudo exportar: ${(e as Error).message}`, { error: true }),
     )
   }
@@ -319,9 +321,11 @@ function Workspace({ live, user }: { live: Live; user: User }) {
       const file = input.files?.[0]
       if (!file || !editor) return
       try {
-        const { html } = await importFile(file)
-        editor.chain().focus().insertContent(htmlToContent(html)).run()
+        const r = await importFile(file)
+        const content = r.content ?? htmlToContent(r.html ?? '')
+        editor.chain().focus().insertContent(content.content ?? []).run()
         toast(`«${file.name}» insertado`)
+        for (const w of r.warnings ?? []) toast(w)
       } catch (e) {
         toast((e as Error).message, { error: true })
       }
@@ -490,8 +494,8 @@ function Workspace({ live, user }: { live: Live; user: User }) {
         <main className="ed-canvas" onMouseDown={(e) => e.target === e.currentTarget && editor.commands.focus('end')}>
           {finding && <FindReplace editor={editor} readOnly={mode === 'view'} onClose={() => setFinding(false)} />}
           <article
-            className={`sheet${paged ? ' is-paged' : ''}${settings.paper === 'letter' ? ' is-letter' : ''}`}
-            style={{ ['--doc-font' as string]: docFont }}
+            className={`sheet${paged ? ' is-paged' : ''}${settings.paper === 'letter' ? ' is-letter' : ''}${settings.sheet === 'paper' ? ' is-paper' : ''}${settings.layout === 'word' ? ' is-word' : ''}`}
+            style={sheetVars(settings, docFont)}
           >
             <EditorContent editor={editor} />
           </article>
@@ -574,7 +578,7 @@ function Workspace({ live, user }: { live: Live; user: User }) {
         {preview && (
           <>
             <p>{new Date(preview.created_at).toLocaleString('es', { dateStyle: 'full', timeStyle: 'short' })}</p>
-            <div className="version-preview vd-prose" style={{ ['--doc-font' as string]: docFont }} dangerouslySetInnerHTML={{ __html: generateHTML(preview.content, baseExtensions()) }} />
+            <div className={`version-preview vd-prose${settings.sheet === 'paper' ? ' is-paper' : ''}`} style={sheetVars(settings, docFont)} dangerouslySetInnerHTML={{ __html: generateHTML(preview.content, baseExtensions()) }} />
             <div className="modal-actions">
               <button className="btn btn-ghost" onClick={() => setPreview(null)}>Cerrar</button>
               <button className="btn btn-primary" onClick={() => restore(preview)} disabled={mode === 'view'}>Restaurar esta versión</button>
@@ -584,6 +588,15 @@ function Workspace({ live, user }: { live: Live; user: User }) {
       </Modal>
     </div>
   )
+}
+
+/** Variables CSS de la hoja a partir de los ajustes del documento. */
+function sheetVars(s: DocSettings, font: string): React.CSSProperties {
+  const vars: Record<string, string> = { '--doc-font': font }
+  if (s.fontSize) vars['--doc-size'] = `${s.fontSize}pt`
+  if (s.lineHeight) vars['--doc-line'] = String(s.lineHeight)
+  if (s.paragraphGap !== undefined) vars['--doc-gap'] = `${s.paragraphGap}pt`
+  return vars as React.CSSProperties
 }
 
 function SaveBadge(p: { state: SaveState; sync: SyncStatus; savedAt: number; storage: 'neon' | 'local'; onRetry: () => void }) {
@@ -782,6 +795,7 @@ const SHORTCUTS: [string, string][] = [
   ['Lista con viñetas / numerada', 'Ctrl+Shift+8 / 7'],
   ['Lista de tareas', 'Ctrl+Shift+9'],
   ['Insertar bloque', '/'],
+  ['Salto de página', 'Ctrl+Intro'],
   ['Enlace', 'Ctrl+K'],
   ['Comentario', 'Ctrl+Alt+M'],
   ['Buscar y reemplazar', 'Ctrl+H'],

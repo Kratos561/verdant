@@ -82,8 +82,8 @@
 .sheet.is-paged.is-letter { --page-h: 1056px; max-width: 816px; }
 
 /* Contenido del documento */
-.vd-prose { font-family: var(--doc-font); font-weight: 400; font-size: 12pt; line-height: 1.55; outline: none; min-height: 60vh; caret-color: var(--accent); overflow-wrap: break-word; }
-.vd-prose > * + * { margin-top: 0.7em; }
+.vd-prose { font-family: var(--doc-font); font-weight: 400; font-size: var(--doc-size, 12pt); line-height: var(--doc-line, 1.55); outline: none; min-height: 60vh; caret-color: var(--accent); overflow-wrap: break-word; }
+.vd-prose > * + * { margin-top: var(--doc-gap, 0.7em); }
 .vd-prose p { margin: 0; }
 .vd-prose h1, .vd-prose h2, .vd-prose h3, .vd-prose h4, .vd-prose h5, .vd-prose h6 { font-weight: 700; line-height: 1.25; margin: 1.3em 0 0.4em; letter-spacing: -0.01em; }
 .vd-prose > :first-child { margin-top: 0; }
@@ -282,3 +282,50 @@ kbd { font-family: var(--font-ui); font-size: 11px; padding: 1px 5px; border-rad
 @keyframes vd-live { 0% { box-shadow: 0 0 0 0 rgba(61, 220, 151, 0.5); } 70%, 100% { box-shadow: 0 0 0 7px rgba(61, 220, 151, 0); } }
 .share-link { display: flex; gap: 8px; margin-bottom: 14px; }
 .share-link .input { height: 34px; font-size: 12.5px; }
+
+/* Salto de página */
+.vd-prose .vd-page-break {
+  position: relative; height: 0; margin: 30px 0 !important; border-top: 1px dashed var(--line-2);
+  user-select: none; cursor: default;
+}
+.vd-prose .vd-page-break::after {
+  content: 'Salto de página'; position: absolute; left: 50%; top: -9px; transform: translateX(-50%);
+  padding: 0 10px; background: var(--page); color: var(--text-3);
+  font: 600 10px/18px var(--font-ui); letter-spacing: 0.08em; text-transform: uppercase;
+}
+.vd-prose .vd-page-break.ProseMirror-selectednode { border-top-color: var(--accent); }
+.vd-prose .vd-page-break.ProseMirror-selectednode::after { color: var(--accent); }
+.vd-prose .vd-page-break + * { margin-top: 0 !important; }
+
+/* Documentos importados de Word: los títulos y el espaciado los marca el propio documento */
+.sheet.is-word .vd-prose :is(h1, h2, h3, h4, h5, h6) { font-size: 1em; font-weight: inherit; margin: 0; letter-spacing: 0; color: inherit; }
+.sheet.is-word .vd-prose li::marker { color: inherit; }
+.sheet.is-word .vd-prose ul, .sheet.is-word .vd-prose ol { margin: 0; }
+
+/* Hoja de papel: como en Word, para documentos con colores pensados sobre blanco */
+.sheet.is-paper, .version-preview.is-paper {
+  --page: #fbfbf8; --page-text: #1f2421; --text-3: #8a948d; --line-2: rgba(0, 0, 0, 0.16);
+  background-color: var(--page); color: var(--page-text); border-color: rgba(255, 255, 255, 0.14);
+}
+.sheet.is-paper .vd-prose { caret-color: #1a7f52; }
+.sheet.is-paper .vd-prose ::selection { background: rgba(61, 220, 151, 0.35); }
+.sheet.is-paper .vd-prose a { color: #17734b; }
+.sheet.is-paper .vd-prose li::marker { color: #2b8a5e; }
+.sheet.is-paper.is-word .vd-prose li::marker { color: inherit; }
+.sheet.is-paper .vd-prose blockquote { color: #4d5751; border-left-color: rgba(43, 138, 94, 0.5); }
+.sheet.is-paper .vd-prose code { background: rgba(0, 0, 0, 0.06); }
+.sheet.is-paper .vd-prose pre { background: #f0f2ef; border-color: rgba(0, 0, 0, 0.1); }
+.sheet.is-paper .vd-prose td, .sheet.is-paper .vd-prose th { border-color: rgba(0, 0, 0, 0.22); }
+.sheet.is-paper .vd-prose th { background: rgba(43, 138, 94, 0.08); }
+.sheet.is-paper .vd-prose hr { border-top-color: rgba(0, 0, 0, 0.2); }
+.sheet.is-paper .vd-prose h5, .sheet.is-paper .vd-prose h6 { color: #4d5751; }
+.sheet.is-paper .vd-prose mark { background: #fff59d; }
+.sheet.is-paper .vd-prose .vd-comment { background: rgba(242, 201, 76, 0.35); }
+.sheet.is-paper.is-paged {
+  background:
+    repeating-linear-gradient(to bottom, transparent 0, transparent calc(var(--page-h) - 1px), rgba(0, 0, 0, 0.14) calc(var(--page-h) - 1px), rgba(0, 0, 0, 0.14) var(--page-h)),
+    var(--page);
+}
+
+/* En la hoja oscura, los fondos de celda de Word se atenúan para que el texto claro se siga leyendo */
+.sheet:not(.is-paper) .vd-prose [data-background] { background-color: color-mix(in srgb, var(--cell-bg) 22%, transparent) !important; }

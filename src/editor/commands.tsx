@@ -2,7 +2,7 @@
 import type { Editor, Range } from '@tiptap/core'
 import {
   CheckSquare, Code2, Heading1, Heading2, Heading3, Image as ImageIcon, List, ListOrdered, Minus, Pilcrow,
-  Quote, Table as TableIcon, CalendarDays,
+  Quote, Table as TableIcon, CalendarDays, SeparatorHorizontal,
 } from 'lucide-react'
 import type { ReactNode } from 'react'
 
@@ -62,6 +62,7 @@ export const BLOCK_COMMANDS: BlockCommand[] = [
     },
   },
   { id: 'hr', title: 'Separador', hint: 'Línea horizontal', keywords: 'separador linea divider', icon: icon(Minus), run: (e, r) => chainAt(e, r).setHorizontalRule().run() },
+  { id: 'pagebreak', title: 'Salto de página', hint: 'Ctrl+Intro', keywords: 'salto pagina page break', icon: icon(SeparatorHorizontal), run: (e, r) => chainAt(e, r).setPageBreak().run() },
   {
     id: 'date', title: 'Fecha de hoy', hint: 'Inserta la fecha', keywords: 'fecha hoy date', icon: icon(CalendarDays),
     run: (e, r) => chainAt(e, r).insertContent(new Date().toLocaleDateString('es', { day: 'numeric', month: 'long', year: 'numeric' })).run(),

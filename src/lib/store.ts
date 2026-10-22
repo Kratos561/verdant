@@ -7,8 +7,18 @@ import { neonTransport } from './transport-neon'
 
 export interface DocSettings {
   font?: string
+  /** Tamaño base del texto en pt (12 si no se indica). */
+  fontSize?: number
+  /** Interlineado base (multiplicador CSS). */
+  lineHeight?: number
+  /** Separación entre párrafos en pt; sin valor, la de Verdant (0,7 em). */
+  paragraphGap?: number
   pageMode?: 'pageless' | 'paged'
   paper?: 'a4' | 'letter'
+  /** Color de la hoja: oscura (Verdant) o papel (como en Word). */
+  sheet?: 'dark' | 'paper'
+  /** 'word': títulos y espaciado salen del propio documento (importado de Word), no del estilo de Verdant. */
+  layout?: 'verdant' | 'word'
 }
 
 export interface DocMeta {

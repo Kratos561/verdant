@@ -129,15 +129,16 @@ export default function Library({ user }: { user: User }) {
       let lastId = ''
       for (const file of files) {
         try {
-          const { title, html } = await importFile(file)
-          const content = htmlToContent(html)
+          const r = await importFile(file)
+          const content = r.content ?? htmlToContent(r.html ?? '')
           const d = await store.createDoc({
-            title,
+            title: r.title,
             content,
-            text_plain: contentToText(content),
+            text_plain: contentToText(content).slice(0, 20000),
             folder_id: folderId,
-            settings: { font: COURIER_STACK },
+            settings: { font: COURIER_STACK, ...r.settings },
           })
+          for (const w of r.warnings ?? []) toast(`${file.name}: ${w}`)
           ok++
           lastId = d.id
         } catch (e) {

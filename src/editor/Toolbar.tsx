@@ -94,7 +94,7 @@ export default function Toolbar({ editor, mode, settings, setSettings, spellchec
   const c = () => editor.chain().focus()
   const docFont = settings.font ?? COURIER_STACK
   const currentFont = s.font ?? docFont
-  const currentSize = s.size ? parseInt(s.size, 10) : 12
+  const currentSize = s.size ? parseInt(s.size, 10) : (settings.fontSize ?? 12)
 
   const setSize = (n: number) => {
     const v = Math.max(6, Math.min(96, n))
@@ -137,6 +137,9 @@ export default function Toolbar({ editor, mode, settings, setSettings, spellchec
     { label: 'Diseño sin páginas', onSelect: () => setSettings({ pageMode: 'pageless' }), checked: settings.pageMode !== 'paged' },
     { label: 'Diseño con páginas', onSelect: () => setSettings({ pageMode: 'paged' }), checked: settings.pageMode === 'paged' },
     { separator: true },
+    { label: 'Hoja oscura', onSelect: () => setSettings({ sheet: 'dark' }), checked: settings.sheet !== 'paper' },
+    { label: 'Hoja de papel', onSelect: () => setSettings({ sheet: 'paper' }), checked: settings.sheet === 'paper' },
+    { separator: true },
     { label: 'Esquema del documento', onSelect: a.toggleOutline },
     { label: 'Panel lateral', onSelect: a.togglePanel },
     { label: 'Modo enfoque', kbd: 'Ctrl+Shift+F', onSelect: a.toggleFocus },
@@ -150,6 +153,7 @@ export default function Toolbar({ editor, mode, settings, setSettings, spellchec
       disabled: ro,
     })),
     { separator: true },
+    { label: 'Salto de página', kbd: 'Ctrl+Intro', onSelect: () => c().setPageBreak().run(), disabled: ro },
     { label: 'Enlace', kbd: 'Ctrl+K', onSelect: a.link, disabled: ro },
     { label: 'Comentario', kbd: 'Ctrl+Alt+M', onSelect: a.comment, disabled: s.empty },
   ]

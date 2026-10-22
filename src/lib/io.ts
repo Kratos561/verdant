@@ -8,6 +8,7 @@ import {
   ImageRun,
   LevelFormat,
   Packer,
+  PageBreak,
   Paragraph,
   ShadingType,
   Table,
@@ -20,6 +21,9 @@ import type { IRunOptions, ParagraphChild } from 'docx'
 import mammoth from 'mammoth'
 import { marked } from 'marked'
 import TurndownService from 'turndown'
+import { docxToContent } from './docx-import'
+import type { DocSettings } from './store'
+import { validContent } from '../editor/extensions'
 
 export type ExportFormat = 'docx' | 'pdf' | 'html' | 'md' | 'txt'
 
@@ -28,6 +32,16 @@ export interface ExportInput {
   html: string
   json: JSONContent
   text: string
+  settings?: DocSettings
+}
+
+export interface ImportResult {
+  title: string
+  /** JSON del editor ya listo (Word); si no viene, se convierte `html`. */
+  content?: JSONContent
+  html?: string
+  settings?: Partial<DocSettings>
+  warnings?: string[]
 }
 
 export const IMPORT_ACCEPT = '.docx,.md,.markdown,.txt,.html,.htm'
@@ -64,7 +78,7 @@ function download(blob: Blob, fileName: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-function fullHtml(title: string, body: string): string {
+function fullHtml(title: string, body: string, settings: DocSettings = {}): string {
   return `<!doctype html>
 <html lang="es">
 <head>
@@ -72,7 +86,9 @@ function fullHtml(title: string, body: string): string {
 <title>${escapeHtml(title)}</title>
 <style>
   @page { size: A4; margin: 2.2cm }
-  body { font-family: ${DEFAULT_FONT}; font-size: 12pt; line-height: 1.5; color: #111; max-width: 800px; margin: 0 auto; padding: 1rem }
+  body { font-family: ${settings.font ?? DEFAULT_FONT}; font-size: ${settings.fontSize ?? 12}pt; line-height: ${settings.lineHeight ?? 1.5}; color: #111; max-width: 800px; margin: 0 auto; padding: 1rem }
+  p { margin: 0 0 ${settings.paragraphGap ?? 8}pt }
+  .vd-page-break { break-after: page; page-break-after: always; height: 0 }
   h1, h2, h3, h4, h5, h6 { line-height: 1.25; page-break-after: avoid }
   blockquote { margin: 1em 0; padding-left: 1em; border-left: 3px solid #999; color: #444 }
   pre { background: #f4f4f4; padding: .75em; white-space: pre-wrap; page-break-inside: avoid }
@@ -118,7 +134,7 @@ function toMarkdown(html: string): string {
   return td.turndown(html)
 }
 
-function printPdf(title: string, html: string): Promise<void> {
+function printPdf(title: string, html: string, settings?: DocSettings): Promise<void> {
   return new Promise((resolve) => {
     const iframe = document.createElement('iframe')
     iframe.setAttribute('aria-hidden', 'true')
@@ -139,7 +155,7 @@ function printPdf(title: string, html: string): Promise<void> {
       win.print()
       setTimeout(cleanup, 60000)
     }
-    iframe.srcdoc = fullHtml(title, html)
+    iframe.srcdoc = fullHtml(title, html, settings)
     document.body.appendChild(iframe)
   })
 }
@@ -149,7 +165,7 @@ export async function exportDocument(format: ExportFormat, doc: ExportInput): Pr
   switch (format) {
     case 'html':
       download(
-        new Blob([fullHtml(base, doc.html)], { type: 'text/html;charset=utf-8' }),
+        new Blob([fullHtml(base, doc.html, doc.settings)], { type: 'text/html;charset=utf-8' }),
         `${base}.html`,
       )
       return
@@ -163,10 +179,10 @@ export async function exportDocument(format: ExportFormat, doc: ExportInput): Pr
       download(new Blob([doc.text], { type: 'text/plain;charset=utf-8' }), `${base}.txt`)
       return
     case 'pdf':
-      await printPdf(base, doc.html)
+      await printPdf(base, doc.html, doc.settings)
       return
     case 'docx':
-      download(await toDocxBlob(doc.json), `${base}.docx`)
+      download(await toDocxBlob(doc.json, doc.settings), `${base}.docx`)
       return
   }
 }
@@ -362,9 +378,34 @@ async function inline(
   return out
 }
 
+const twips = (pt: unknown) => (typeof pt === 'number' ? Math.round(pt * 20) : undefined)
+
 function paragraphOptions(node: JSONContent, ctx: Ctx) {
+  const a = node.attrs ?? {}
+  const textIndent = typeof a.textIndent === 'number' ? a.textIndent : undefined
+  const hasIndent = a.indentLeft != null || a.indentRight != null || textIndent != null
+  const hasSpacing = a.spaceBefore != null || a.spaceAfter != null || a.lineSpacing != null
   return {
-    alignment: ALIGN[String(node.attrs?.textAlign ?? '')],
+    alignment: ALIGN[String(a.textAlign ?? '')],
+    ...(hasIndent
+      ? {
+          indent: {
+            left: twips(a.indentLeft),
+            right: twips(a.indentRight),
+            firstLine: textIndent && textIndent > 0 ? twips(textIndent) : undefined,
+            hanging: textIndent && textIndent < 0 ? twips(-textIndent) : undefined,
+          },
+        }
+      : {}),
+    ...(hasSpacing
+      ? {
+          spacing: {
+            before: twips(a.spaceBefore),
+            after: twips(a.spaceAfter),
+            line: typeof a.lineSpacing === 'number' ? Math.round((a.lineSpacing / 1.15) * 240) : undefined,
+          },
+        }
+      : {}),
     ...(ctx.quote
       ? {
           indent: { left: 720 },
@@ -466,6 +507,8 @@ async function block(node: JSONContent, ctx: Ctx): Promise<DocxBlock[]> {
         }),
       ]
     }
+    case 'pageBreak':
+      return [new Paragraph({ children: [new PageBreak()] })]
     case 'horizontalRule':
       return [
         new Paragraph({
@@ -517,7 +560,11 @@ async function table(node: JSONContent): Promise<Table> {
           children,
           columnSpan: colspan > 1 ? colspan : undefined,
           rowSpan: rowspan > 1 ? rowspan : undefined,
-          shading: isHeader ? { type: ShadingType.CLEAR, color: 'auto', fill: 'EEEEEE' } : undefined,
+          shading: cell.attrs?.cellBackground
+            ? { type: ShadingType.CLEAR, color: 'auto', fill: String(cell.attrs.cellBackground).replace('#', '') }
+            : isHeader
+              ? { type: ShadingType.CLEAR, color: 'auto', fill: 'EEEEEE' }
+              : undefined,
         }),
       )
     }
@@ -526,13 +573,23 @@ async function table(node: JSONContent): Promise<Table> {
   return new Table({ rows, width: { size: 100, type: WidthType.PERCENTAGE } })
 }
 
-async function toDocxBlob(json: JSONContent): Promise<Blob> {
+async function toDocxBlob(json: JSONContent, settings: DocSettings = {}): Promise<Blob> {
+  const font = (settings.font ?? MONO).split(',')[0].replace(/["']/g, '').trim()
+  const size = Math.round((settings.fontSize ?? 12) * 2)
+  const line = Math.round(((settings.lineHeight ?? 1.15) / 1.15) * 240)
   orderedInstance = 0
   const children: DocxBlock[] = []
   for (const node of json.content ?? []) children.push(...(await block(node, ROOT)))
   if (!children.length) children.push(new Paragraph({ children: [] }))
   const doc = new Document({
-    styles: { default: { document: { run: { font: MONO, size: 24 } } } },
+    styles: {
+      default: {
+        document: {
+          run: { font, size },
+          paragraph: { spacing: { line, after: Math.round((settings.paragraphGap ?? 8) * 20) } },
+        },
+      },
+    },
     numbering: {
       config: [
         { reference: 'verdant-ul', levels: numberingLevels('bullet') },
@@ -582,15 +639,22 @@ function markdownTaskLists(html: string): string {
   return parsed.body.innerHTML
 }
 
-export async function importFile(file: File): Promise<{ title: string; html: string }> {
+export async function importFile(file: File): Promise<ImportResult> {
   const dot = file.name.lastIndexOf('.')
   const ext = dot >= 0 ? file.name.slice(dot).toLowerCase() : ''
   const title = dot > 0 ? file.name.slice(0, dot) : file.name
 
   switch (ext) {
     case '.docx': {
-      const result = await mammoth.convertToHtml({ arrayBuffer: await file.arrayBuffer() })
-      return { title, html: result.value }
+      const buffer = await file.arrayBuffer()
+      try {
+        const r = await docxToContent(buffer)
+        return { title, content: validContent(r.content), settings: r.settings, warnings: r.warnings }
+      } catch (err) {
+        console.warn('Importador de Word: se usa el modo simple', err)
+        const result = await mammoth.convertToHtml({ arrayBuffer: buffer })
+        return { title, html: result.value, warnings: ['Este Word se importó en modo simple: parte del formato puede perderse.'] }
+      }
     }
     case '.md':
     case '.markdown': {
