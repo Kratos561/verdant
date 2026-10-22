@@ -31,6 +31,7 @@ function check(r: AuthResult): void {
 function translate(msg: string): string {
   const m = msg.toLowerCase()
   if (m.includes('invalid email or password')) return 'Correo o contraseña incorrectos.'
+  if (m.includes('too many')) return 'Demasiados intentos. Espera un minuto y vuelve a probar.'
   if (m.includes('already exists')) return 'Ya existe una cuenta con ese correo.'
   if (m.includes('password') && m.includes('short')) return 'La contraseña debe tener al menos 8 caracteres.'
   if (m.includes('invalid email')) return 'El correo no es válido.'
@@ -51,9 +52,14 @@ export async function signIn(email: string, password: string): Promise<void> {
 /** Verdant es privado: solo las cuentas de app_members ven datos (lo impone RLS en Postgres). */
 export async function isMember(): Promise<boolean> {
   if (!neonClient) return true
-  const r = (await neonClient.rpc('is_member')) as { data: unknown; error: { message: string } | null }
-  if (r.error) throw new Error(r.error.message)
-  return r.data === true
+  // Un «no» se confirma una segunda vez antes de cerrar la puerta: evita un falso negativo puntual.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = (await neonClient.rpc('is_member')) as { data: unknown; error: { message: string } | null }
+    if (r.error) throw new Error(r.error.message)
+    if (r.data === true) return true
+    await new Promise((res) => setTimeout(res, 800))
+  }
+  return false
 }
 
 export async function signOut(): Promise<void> {
