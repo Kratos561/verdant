@@ -14,7 +14,7 @@ const base = new URL(env.VITE_NEON_URL)
 const [endpoint, ...rest] = base.host.split('.')
 const AUTH = `https://${endpoint}.neonauth.${rest.join('.')}${base.pathname}/auth`
 const DATA = `https://${endpoint}.apirest.${rest.join('.')}${base.pathname}/rest/v1`
-const ORIGIN = 'http://localhost:5180'
+const ORIGIN = process.env.SMOKE_ORIGIN ?? 'http://localhost:5180'
 
 let failures = 0
 const check = (name, ok, extra = '') => {
