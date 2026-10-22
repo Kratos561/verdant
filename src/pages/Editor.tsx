@@ -1,0 +1,666 @@
+// Página del editor: barra superior, barra de herramientas, esquema, hoja y panel lateral.
+import { generateHTML } from '@tiptap/core'
+import { EditorContent, useEditor, useEditorState } from '@tiptap/react'
+import type { Editor as TiptapEditor } from '@tiptap/react'
+import { BubbleMenu } from '@tiptap/react/menus'
+import {
+  Bold, Cloud, CloudOff, FolderInput, Italic, Link2, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Share2,
+  Star, Strikethrough, Underline as UnderlineIcon,
+} from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { MenuButton, Modal, avatarColor, initials, navigate, timeAgo, useTick, useToast } from '../components/ui'
+import type { User } from '../lib/auth'
+import { COURIER_STACK } from '../lib/fonts'
+import { IMPORT_ACCEPT, exportDocument, importFile } from '../lib/io-lazy'
+import type { ExportFormat } from '../lib/io-lazy'
+import { UNTITLED, store } from '../lib/store'
+import type { Doc, DocSettings, Folder, Version } from '../lib/store'
+import { baseExtensions, contentToText, editorExtensions, htmlToContent } from '../editor/extensions'
+import FindReplace from '../editor/FindReplace'
+import Outline from '../editor/Outline'
+import SidePanel from '../editor/SidePanel'
+import type { CommentDraft } from '../editor/SidePanel'
+import { SlashCommand } from '../editor/SlashCommand'
+import Toolbar from '../editor/Toolbar'
+import type { EditorMode } from '../editor/Toolbar'
+import { Logo } from './Library'
+import '../styles/editor.css'
+
+type SaveState = 'saved' | 'dirty' | 'saving' | 'error'
+type Dialog = null | 'rename' | 'page' | 'words' | 'shortcuts' | 'link' | 'share' | 'move' | 'trash'
+
+const SAVE_DELAY = 700
+const SNAPSHOT_EVERY = 10 * 60 * 1000
+
+export default function EditorPage({ id, user }: { id: string; user: User }) {
+  const [doc, setDoc] = useState<Doc | null | undefined>(undefined)
+  useEffect(() => {
+    store.getDoc(id).then(setDoc).catch(() => setDoc(null))
+  }, [id])
+
+  if (doc === undefined) {
+    return (
+      <div className="center-screen">
+        <div className="spinner" aria-label="Abriendo documento" />
+      </div>
+    )
+  }
+  if (doc === null || doc.trashed_at) {
+    return (
+      <div className="center-screen">
+        <div className="glass-float modal">
+          <h2>No encontramos este documento</h2>
+          <p>Puede que se haya eliminado o que no tengas acceso.</p>
+          <div className="modal-actions">
+            <button className="btn btn-primary" onClick={() => navigate('/')}>Ir a la biblioteca</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+  return <Workspace initial={doc} user={user} />
+}
+
+function Workspace({ initial, user }: { initial: Doc; user: User }) {
+  useTick(5000)
+  const toast = useToast()
+  const [doc, setDoc] = useState(initial)
+  const [title, setTitle] = useState(initial.title)
+  const [save, setSave] = useState<SaveState>('saved')
+  const [savedAt, setSavedAt] = useState(Date.parse(initial.updated_at))
+  const [mode, setMode] = useState<EditorMode>('edit')
+  const [showOutline, setShowOutline] = useState(() => innerWidth > 1100)
+  const [showPanel, setShowPanel] = useState(() => innerWidth > 1280)
+  const [focusMode, setFocusMode] = useState(false)
+  const [finding, setFinding] = useState(false)
+  const [dialog, setDialog] = useState<Dialog>(null)
+  const [draft, setDraft] = useState<CommentDraft | null>(null)
+  const [versionsKey, setVersionsKey] = useState(0)
+  const [preview, setPreview] = useState<Version | null>(null)
+  const [spellcheck, setSpellcheck] = useState(true)
+  const [folders, setFolders] = useState<Folder[]>([])
+
+  const timer = useRef<number | undefined>(undefined)
+  const lastSnapshot = useRef(Date.now())
+  const editorRef = useRef<TiptapEditor | null>(null)
+
+  const settings = doc.settings
+  const docFont = settings.font ?? COURIER_STACK
+
+  const persist = useCallback(async () => {
+    const ed = editorRef.current
+    if (!ed) return
+    clearTimeout(timer.current)
+    const content = ed.getJSON()
+    setSave('saving')
+    try {
+      await store.updateDoc(doc.id, { content, text_plain: contentToText(content).slice(0, 20000) })
+      setSave('saved')
+      setSavedAt(Date.now())
+      if (Date.now() - lastSnapshot.current > SNAPSHOT_EVERY) {
+        lastSnapshot.current = Date.now()
+        await store.createVersion(doc.id, { title, content, label: null })
+        setVersionsKey((k) => k + 1)
+      }
+    } catch {
+      setSave('error')
+    }
+  }, [doc.id, title])
+
+  const persistRef = useRef(persist)
+  persistRef.current = persist
+
+  const editor = useEditor({
+    extensions: [...editorExtensions(), SlashCommand],
+    content: initial.content,
+    autofocus: initial.text_plain ? false : 'start',
+    editorProps: { attributes: { class: 'vd-prose', spellcheck: 'true', 'aria-label': 'Contenido del documento' } },
+    onUpdate: () => {
+      setSave('dirty')
+      clearTimeout(timer.current)
+      timer.current = window.setTimeout(() => persistRef.current(), SAVE_DELAY)
+    },
+  })
+  editorRef.current = editor
+
+  useEffect(() => {
+    editor?.setEditable(mode === 'edit')
+  }, [editor, mode])
+  useEffect(() => {
+    editor?.view.dom.setAttribute('spellcheck', String(spellcheck))
+  }, [editor, spellcheck])
+  useEffect(() => {
+    document.title = `${title || UNTITLED} · Verdant`
+    return () => {
+      document.title = 'Verdant'
+    }
+  }, [title])
+
+  // Guarda lo pendiente al salir de la página o al ocultar la pestaña.
+  useEffect(() => {
+    const flush = () => save !== 'saved' && persistRef.current()
+    const onHide = () => document.visibilityState === 'hidden' && flush()
+    addEventListener('beforeunload', flush)
+    document.addEventListener('visibilitychange', onHide)
+    return () => {
+      removeEventListener('beforeunload', flush)
+      document.removeEventListener('visibilitychange', onHide)
+    }
+  }, [save])
+  useEffect(() => () => void persistRef.current(), [])
+
+  const patchDoc = useCallback(
+    async (patch: Partial<Doc>, okMsg?: string) => {
+      const before = doc
+      setDoc((d) => ({ ...d, ...patch }))
+      try {
+        await store.updateDoc(doc.id, patch)
+        if (okMsg) toast(okMsg)
+      } catch (e) {
+        setDoc(before)
+        toast(`No se pudo guardar: ${(e as Error).message}`, { error: true })
+      }
+    },
+    [doc, toast],
+  )
+
+  const setSettings = (p: Partial<DocSettings>) => patchDoc({ settings: { ...settings, ...p } })
+
+  const commitTitle = (value = title) => {
+    const t = value.trim() || UNTITLED
+    setTitle(t)
+    if (t !== doc.title) patchDoc({ title: t })
+  }
+
+  const startComment = useCallback(() => {
+    if (!editor) return
+    const { from, to, empty } = editor.state.selection
+    if (empty) return toast('Selecciona el texto que quieres comentar')
+    setDraft({ from, to, quote: editor.state.doc.textBetween(from, to, ' ').slice(0, 280) })
+    setShowPanel(true)
+  }, [editor, toast])
+
+  const saveVersion = async () => {
+    if (!editor) return
+    try {
+      await store.createVersion(doc.id, { title, content: editor.getJSON(), label: `Versión del ${new Date().toLocaleString('es', { dateStyle: 'medium', timeStyle: 'short' })}` })
+      lastSnapshot.current = Date.now()
+      setVersionsKey((k) => k + 1)
+      setShowPanel(true)
+      toast('Versión guardada')
+    } catch (e) {
+      toast(`No se pudo guardar la versión: ${(e as Error).message}`, { error: true })
+    }
+  }
+
+  const restore = async (v: Version) => {
+    if (!editor) return
+    await store.createVersion(doc.id, { title, content: editor.getJSON(), label: 'Antes de restaurar' })
+    editor.commands.setContent(v.content, { emitUpdate: true })
+    setPreview(null)
+    setVersionsKey((k) => k + 1)
+    toast('Versión restaurada')
+  }
+
+  const exportAs = (format: ExportFormat) => {
+    if (!editor) return
+    exportDocument(format, { title, html: editor.getHTML(), json: editor.getJSON(), text: editor.getText() }).catch((e) =>
+      toast(`No se pudo exportar: ${(e as Error).message}`, { error: true }),
+    )
+  }
+
+  const importInto = () => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = IMPORT_ACCEPT
+    input.onchange = async () => {
+      const file = input.files?.[0]
+      if (!file || !editor) return
+      try {
+        const { html } = await importFile(file)
+        editor.chain().focus().insertContent(htmlToContent(html)).run()
+        toast(`«${file.name}» insertado`)
+      } catch (e) {
+        toast((e as Error).message, { error: true })
+      }
+    }
+    input.click()
+  }
+
+  const newDoc = async () => {
+    const d = await store.createDoc({ folder_id: doc.folder_id, settings: { font: docFont } })
+    navigate(`/d/${d.id}`)
+  }
+
+  const copyDoc = async () => {
+    if (!editor) return
+    const content = editor.getJSON()
+    const d = await store.createDoc({ title: `Copia de ${title}`, content, text_plain: contentToText(content), folder_id: doc.folder_id, settings })
+    navigate(`/d/${d.id}`)
+    toast('Copia creada')
+  }
+
+  const trash = async () => {
+    await store.updateDoc(doc.id, { trashed_at: new Date().toISOString() })
+    navigate('/')
+    toast('Documento movido a la papelera')
+  }
+
+  // Atajos globales del editor.
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey
+      if (!mod) return
+      const k = e.key.toLowerCase()
+      if (k === 's') (e.preventDefault(), persistRef.current().then(() => toast('Guardado')))
+      else if (k === 'h' || (k === 'f' && !e.shiftKey)) (e.preventDefault(), setFinding(true))
+      else if (k === 'p') (e.preventDefault(), exportAs('pdf'))
+      else if (k === 'k') (e.preventDefault(), setDialog('link'))
+      else if (k === '/') (e.preventDefault(), setDialog('shortcuts'))
+      else if (e.altKey && k === 'm') (e.preventDefault(), startComment())
+      else if (e.shiftKey && k === 'c') (e.preventDefault(), setDialog('words'))
+      else if (e.shiftKey && k === 'f') (e.preventDefault(), setFocusMode((f) => !f))
+    }
+    document.addEventListener('keydown', on)
+    return () => document.removeEventListener('keydown', on)
+  })
+
+  if (!editor) return null
+
+  const actions = {
+    newDoc,
+    copyDoc,
+    goHome: () => navigate('/'),
+    importInto,
+    exportAs,
+    rename: () => setDialog('rename'),
+    trash: () => setDialog('trash'),
+    pageSetup: () => setDialog('page'),
+    find: () => setFinding(true),
+    wordCount: () => setDialog('words'),
+    shortcuts: () => setDialog('shortcuts'),
+    comment: startComment,
+    link: () => setDialog('link'),
+    toggleOutline: () => setShowOutline((v) => !v),
+    togglePanel: () => setShowPanel((v) => !v),
+    toggleFocus: () => setFocusMode((f) => !f),
+    setMode,
+    saveVersion,
+    error: (msg: string) => toast(msg, { error: true }),
+  }
+
+  const paged = settings.pageMode === 'paged'
+
+  return (
+    <div className={`ed${focusMode ? ' is-focus' : ''}${showOutline ? ' has-outline' : ''}${showPanel ? ' has-panel' : ''}`}>
+      <header className="ed-top glass">
+        <button className="ed-logo" onClick={() => navigate('/')} aria-label="Volver a la biblioteca">
+          <Logo />
+        </button>
+        <div className="ed-title">
+          <input
+            aria-label="Título del documento"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            onBlur={() => commitTitle()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.currentTarget.blur(), editor.commands.focus())
+              if (e.key === 'Escape') (setTitle(doc.title), e.currentTarget.blur())
+            }}
+            style={{ width: `${Math.min(Math.max(title.length, 8), 42)}ch` }}
+          />
+          <button
+            className={`icon-btn${doc.starred ? ' is-star' : ''}`}
+            aria-label={doc.starred ? 'Quitar de destacados' : 'Destacar'}
+            aria-pressed={doc.starred}
+            onClick={() => patchDoc({ starred: !doc.starred })}
+          >
+            <Star size={16} strokeWidth={1.75} fill={doc.starred ? 'currentColor' : 'none'} />
+          </button>
+          <button
+            className="icon-btn"
+            aria-label="Mover a carpeta"
+            onClick={() => {
+              store.listFolders().then(setFolders).catch(() => {})
+              setDialog('move')
+            }}
+          >
+            <FolderInput size={16} strokeWidth={1.75} />
+          </button>
+        </div>
+
+        <SaveBadge state={save} savedAt={savedAt} storage={store.mode} onRetry={() => persist()} />
+
+        <div className="ed-top-right">
+          <button className="icon-btn ed-outline-btn" aria-label="Esquema" aria-pressed={showOutline} onClick={() => setShowOutline((v) => !v)}>
+            <PanelLeft size={16} strokeWidth={1.75} />
+          </button>
+          <div className="avatars" aria-label="Personas en el documento">
+            <span className="avatar" style={{ background: avatarColor(user.id) }} title={`${user.name} (tú)`}>
+              {initials(user.name)}
+            </span>
+          </div>
+          <button className={`btn${showPanel ? ' is-on' : ''}`} onClick={() => setShowPanel((v) => !v)} aria-pressed={showPanel}>
+            <MessageSquare size={15} strokeWidth={1.75} />
+            <span className="hide-sm">Comentarios</span>
+          </button>
+          <button className="btn btn-primary" onClick={() => setDialog('share')}>
+            <Share2 size={15} strokeWidth={2} />
+            <span className="hide-sm">Compartir</span>
+          </button>
+        </div>
+      </header>
+
+      <div className="ed-toolbar-wrap">
+        <Toolbar
+          editor={editor}
+          mode={mode}
+          settings={settings}
+          setSettings={setSettings}
+          spellcheck={spellcheck}
+          setSpellcheck={setSpellcheck}
+          actions={actions}
+        />
+      </div>
+
+      <div className="ed-body">
+        {showOutline && <Outline editor={editor} doc={{ ...doc, title }} storage={store.mode} />}
+
+        <main className="ed-canvas" onMouseDown={(e) => e.target === e.currentTarget && editor.commands.focus('end')}>
+          {finding && <FindReplace editor={editor} readOnly={mode === 'view'} onClose={() => setFinding(false)} />}
+          <article
+            className={`sheet${paged ? ' is-paged' : ''}${settings.paper === 'letter' ? ' is-letter' : ''}`}
+            style={{ ['--doc-font' as string]: docFont }}
+          >
+            <EditorContent editor={editor} />
+          </article>
+        </main>
+
+        {showPanel && (
+          <SidePanel
+            editor={editor}
+            docId={doc.id}
+            user={user}
+            mode={mode}
+            setMode={setMode}
+            draft={draft}
+            clearDraft={() => setDraft(null)}
+            versionsKey={versionsKey}
+            onSaveVersion={saveVersion}
+            onPreviewVersion={setPreview}
+            onClose={() => setShowPanel(false)}
+          />
+        )}
+      </div>
+
+      {mode === 'edit' && <SelectionBubble editor={editor} onComment={startComment} onLink={() => setDialog('link')} />}
+
+      <RenameDialog open={dialog === 'rename'} title={title} onClose={() => setDialog(null)} onSave={(t) => commitTitle(t)} />
+      <PageDialog open={dialog === 'page'} settings={settings} onClose={() => setDialog(null)} onSave={setSettings} />
+      <WordsDialog open={dialog === 'words'} editor={editor} onClose={() => setDialog(null)} />
+      <ShortcutsDialog open={dialog === 'shortcuts'} onClose={() => setDialog(null)} />
+      <LinkDialog open={dialog === 'link'} editor={editor} onClose={() => setDialog(null)} />
+      <Modal open={dialog === 'share'} onClose={() => setDialog(null)} title="Compartir">
+        <p>
+          Por ahora cada documento es privado: solo tú puedes abrirlo. Compartir con personas, roles (lector, comentarista, editor)
+          y edición en tiempo real llegan en la fase de colaboración.
+        </p>
+        <p>Mientras tanto puedes descargarlo y enviarlo:</p>
+        <div className="share-formats">
+          {(['docx', 'pdf', 'md', 'html'] as const).map((f) => (
+            <button key={f} className="btn" onClick={() => (exportAs(f), setDialog(null))}>.{f}</button>
+          ))}
+        </div>
+      </Modal>
+      <Modal open={dialog === 'move'} onClose={() => setDialog(null)} title="Mover a carpeta">
+        <div className="move-list">
+          {[{ id: null as string | null, name: 'Sin carpeta' }, ...folders].map((f) => (
+            <button
+              key={f.id ?? 'none'}
+              className={`menu-item${doc.folder_id === f.id ? ' is-selected' : ''}`}
+              onClick={() => (patchDoc({ folder_id: f.id }, `Movido a «${f.name}»`), setDialog(null))}
+            >
+              {f.name}
+            </button>
+          ))}
+          {folders.length === 0 && <p className="muted">Crea carpetas desde la biblioteca.</p>}
+        </div>
+      </Modal>
+      <Modal open={dialog === 'trash'} onClose={() => setDialog(null)} title="¿Mover a la papelera?">
+        <p>Podrás restaurarlo desde la papelera de la biblioteca.</p>
+        <div className="modal-actions">
+          <button className="btn btn-ghost" onClick={() => setDialog(null)}>Cancelar</button>
+          <button className="btn btn-danger" onClick={trash}>Mover a la papelera</button>
+        </div>
+      </Modal>
+      <Modal open={!!preview} onClose={() => setPreview(null)} title={preview?.label || 'Guardado automático'} width={760}>
+        {preview && (
+          <>
+            <p>{new Date(preview.created_at).toLocaleString('es', { dateStyle: 'full', timeStyle: 'short' })}</p>
+            <div className="version-preview vd-prose" style={{ ['--doc-font' as string]: docFont }} dangerouslySetInnerHTML={{ __html: generateHTML(preview.content, baseExtensions()) }} />
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={() => setPreview(null)}>Cerrar</button>
+              <button className="btn btn-primary" onClick={() => restore(preview)} disabled={mode === 'view'}>Restaurar esta versión</button>
+            </div>
+          </>
+        )}
+      </Modal>
+    </div>
+  )
+}
+
+function SaveBadge({ state, savedAt, storage, onRetry }: { state: SaveState; savedAt: number; storage: 'neon' | 'local'; onRetry: () => void }) {
+  if (state === 'error') {
+    return (
+      <button className="save-badge is-error" onClick={onRetry}>
+        <CloudOff size={14} /> Sin guardar · reintentar
+      </button>
+    )
+  }
+  if (state === 'saving' || state === 'dirty') {
+    return (
+      <span className="save-badge" aria-live="polite">
+        <Loader2 size={14} className="spin" /> Guardando…
+      </span>
+    )
+  }
+  return (
+    <span className="save-badge is-ok" aria-live="polite" title={new Date(savedAt).toLocaleString('es')}>
+      <Cloud size={14} /> {storage === 'neon' ? 'Sincronizado' : 'Guardado en este navegador'} · {timeAgo(savedAt)}
+    </span>
+  )
+}
+
+function SelectionBubble({ editor, onComment, onLink }: { editor: TiptapEditor; onComment: () => void; onLink: () => void }) {
+  const s = useEditorState({
+    editor,
+    selector: ({ editor: e }) => ({
+      bold: e.isActive('bold'),
+      italic: e.isActive('italic'),
+      underline: e.isActive('underline'),
+      strike: e.isActive('strike'),
+      link: e.isActive('link'),
+    }),
+  })
+  const b = (label: string, active: boolean, run: () => void, icon: React.ReactNode) => (
+    <button className={`icon-btn${active ? ' is-active' : ''}`} aria-label={label} title={label} onMouseDown={(e) => e.preventDefault()} onClick={run}>
+      {icon}
+    </button>
+  )
+  const c = () => editor.chain().focus()
+  return (
+    <BubbleMenu
+      editor={editor}
+      className="bubble glass-float"
+      shouldShow={({ editor: e, state }) => !state.selection.empty && e.isEditable && !e.isActive('image')}
+    >
+      {b('Negrita', s.bold, () => c().toggleBold().run(), <Bold size={15} strokeWidth={2} />)}
+      {b('Cursiva', s.italic, () => c().toggleItalic().run(), <Italic size={15} />)}
+      {b('Subrayado', s.underline, () => c().toggleUnderline().run(), <UnderlineIcon size={15} />)}
+      {b('Tachado', s.strike, () => c().toggleStrike().run(), <Strikethrough size={15} />)}
+      <span className="tb-sep" />
+      {b('Enlace', s.link, onLink, <Link2 size={15} />)}
+      {b('Comentar', false, onComment, <MessageSquarePlus size={15} />)}
+      <MenuButton
+        className="icon-btn bubble-more"
+        title="Estilo"
+        items={[
+          { label: 'Texto normal', onSelect: () => c().setParagraph().run() },
+          { label: 'Título 1', onSelect: () => c().setHeading({ level: 1 }).run() },
+          { label: 'Título 2', onSelect: () => c().setHeading({ level: 2 }).run() },
+          { label: 'Título 3', onSelect: () => c().setHeading({ level: 3 }).run() },
+        ]}
+      >
+        Aa
+      </MenuButton>
+    </BubbleMenu>
+  )
+}
+
+function RenameDialog(p: { open: boolean; title: string; onClose: () => void; onSave: (t: string) => void }) {
+  const [v, setV] = useState(p.title)
+  useEffect(() => setV(p.title), [p.title, p.open])
+  return (
+    <Modal open={p.open} onClose={p.onClose} title="Renombrar documento">
+      <form onSubmit={(e) => (e.preventDefault(), p.onSave(v), p.onClose())}>
+        <input className="input" autoFocus value={v} onChange={(e) => setV(e.target.value)} aria-label="Nuevo título" />
+        <div className="modal-actions">
+          <button type="button" className="btn btn-ghost" onClick={p.onClose}>Cancelar</button>
+          <button type="submit" className="btn btn-primary">Guardar</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+function PageDialog(p: { open: boolean; settings: DocSettings; onClose: () => void; onSave: (s: Partial<DocSettings>) => void }) {
+  const [s, setS] = useState(p.settings)
+  useEffect(() => setS(p.settings), [p.settings, p.open])
+  return (
+    <Modal open={p.open} onClose={p.onClose} title="Configurar página">
+      <div className="form-grid">
+        <span>Diseño</span>
+        <div className="seg">
+          <button className={s.pageMode !== 'paged' ? 'is-on' : ''} onClick={() => setS({ ...s, pageMode: 'pageless' })}>Sin páginas</button>
+          <button className={s.pageMode === 'paged' ? 'is-on' : ''} onClick={() => setS({ ...s, pageMode: 'paged' })}>Con páginas</button>
+        </div>
+        <span>Tamaño</span>
+        <div className="seg">
+          <button className={s.paper !== 'letter' ? 'is-on' : ''} onClick={() => setS({ ...s, paper: 'a4' })}>A4</button>
+          <button className={s.paper === 'letter' ? 'is-on' : ''} onClick={() => setS({ ...s, paper: 'letter' })}>Carta</button>
+        </div>
+      </div>
+      <div className="modal-actions">
+        <button className="btn btn-ghost" onClick={p.onClose}>Cancelar</button>
+        <button className="btn btn-primary" onClick={() => (p.onSave(s), p.onClose())}>Aplicar</button>
+      </div>
+    </Modal>
+  )
+}
+
+function WordsDialog({ open, editor, onClose }: { open: boolean; editor: TiptapEditor; onClose: () => void }) {
+  const stats = useMemo(() => {
+    if (!open) return null
+    const text = editor.getText()
+    const { from, to, empty } = editor.state.selection
+    const sel = empty ? '' : editor.state.doc.textBetween(from, to, ' ')
+    const words = (t: string) => (t.trim() ? t.trim().split(/\s+/).length : 0)
+    let paragraphs = 0
+    editor.state.doc.descendants((n) => {
+      if (n.isTextblock && n.textContent.trim()) paragraphs++
+    })
+    return {
+      words: words(text),
+      chars: text.length,
+      charsNoSpace: text.replace(/\s/g, '').length,
+      paragraphs,
+      selWords: words(sel),
+      minutes: Math.max(1, Math.round(words(text) / 230)),
+    }
+  }, [open, editor])
+  return (
+    <Modal open={open} onClose={onClose} title="Contador de palabras">
+      {stats && (
+        <dl className="details details-lg">
+          <dt>Palabras</dt><dd>{stats.words.toLocaleString('es')}</dd>
+          <dt>Caracteres</dt><dd>{stats.chars.toLocaleString('es')}</dd>
+          <dt>Caracteres sin espacios</dt><dd>{stats.charsNoSpace.toLocaleString('es')}</dd>
+          <dt>Párrafos</dt><dd>{stats.paragraphs.toLocaleString('es')}</dd>
+          <dt>Palabras seleccionadas</dt><dd>{stats.selWords.toLocaleString('es')}</dd>
+          <dt>Tiempo de lectura</dt><dd>{stats.minutes} min</dd>
+        </dl>
+      )}
+      <div className="modal-actions">
+        <button className="btn btn-primary" onClick={onClose}>Listo</button>
+      </div>
+    </Modal>
+  )
+}
+
+function LinkDialog({ open, editor, onClose }: { open: boolean; editor: TiptapEditor; onClose: () => void }) {
+  const [url, setUrl] = useState('')
+  useEffect(() => {
+    if (open) setUrl((editor.getAttributes('link').href as string | undefined) ?? '')
+  }, [open, editor])
+  const apply = () => {
+    const href = url.trim()
+    const c = editor.chain().focus().extendMarkRange('link')
+    if (!href) c.unsetLink().run()
+    else if (editor.state.selection.empty && !editor.isActive('link')) {
+      editor.chain().focus().insertContent({ type: 'text', text: href, marks: [{ type: 'link', attrs: { href } }] }).run()
+    } else c.setLink({ href: /^(https?:|mailto:|#)/.test(href) ? href : `https://${href}` }).run()
+    onClose()
+  }
+  return (
+    <Modal open={open} onClose={onClose} title="Enlace">
+      <form onSubmit={(e) => (e.preventDefault(), apply())}>
+        <input className="input" autoFocus placeholder="https://…" value={url} onChange={(e) => setUrl(e.target.value)} aria-label="Dirección del enlace" />
+        <div className="modal-actions">
+          {editor.isActive('link') && (
+            <button type="button" className="btn btn-danger" onClick={() => (editor.chain().focus().extendMarkRange('link').unsetLink().run(), onClose())}>
+              Quitar enlace
+            </button>
+          )}
+          <button type="button" className="btn btn-ghost" onClick={onClose}>Cancelar</button>
+          <button type="submit" className="btn btn-primary">Aplicar</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+const SHORTCUTS: [string, string][] = [
+  ['Negrita / cursiva / subrayado', 'Ctrl+B / I / U'],
+  ['Tachado', 'Ctrl+Shift+S'],
+  ['Título 1–6', 'Ctrl+Alt+1…6'],
+  ['Texto normal', 'Ctrl+Alt+0'],
+  ['Lista con viñetas / numerada', 'Ctrl+Shift+8 / 7'],
+  ['Lista de tareas', 'Ctrl+Shift+9'],
+  ['Insertar bloque', '/'],
+  ['Enlace', 'Ctrl+K'],
+  ['Comentario', 'Ctrl+Alt+M'],
+  ['Buscar y reemplazar', 'Ctrl+H'],
+  ['Guardar ahora', 'Ctrl+S'],
+  ['Imprimir / PDF', 'Ctrl+P'],
+  ['Contador de palabras', 'Ctrl+Shift+C'],
+  ['Modo enfoque', 'Ctrl+Shift+F'],
+  ['Deshacer / rehacer', 'Ctrl+Z / Ctrl+Y'],
+]
+
+function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  return (
+    <Modal open={open} onClose={onClose} title="Atajos de teclado" width={560}>
+      <dl className="details shortcuts">
+        {SHORTCUTS.map(([what, keys]) => (
+          <div key={what} className="shortcut">
+            <dt>{what}</dt>
+            <dd><kbd>{keys}</kbd></dd>
+          </div>
+        ))}
+      </dl>
+      <div className="modal-actions">
+        <button className="btn btn-primary" onClick={onClose}>Entendido</button>
+      </div>
+    </Modal>
+  )
+}
